@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: PhotoBoth
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_PASSWORD
+        # 🔐 CHANGE THIS to your secure password hash!
+        # Generate with: python -c "import hashlib; print(hashlib.sha256('YourPassword123!'.encode()).hexdigest())"
+        value: "your_precomputed_hash_here"
+      - key: DATABASE_URL
+        value: "sqlite:///photoboth.db"
+    disk:
+      name: photoboth-data
+      mountPath: /opt/render/project/src
+      sizeGB: 1
