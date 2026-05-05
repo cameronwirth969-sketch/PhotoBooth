@@ -1,80 +1,119 @@
 #!/usr/bin/env python3
 """
-PhotoBoth - Modern Photo Sharing Platform
-Deploy on Render.com - Single File Application
-FIXED: Template string escaping issues
+PhotoBoth v2.2 - Modern Photo Platform
+Glassmorphism UI, Secure Auth, Admin Controls, Anti-Bruteforce
+Single File - Deploy on Render.com
 """
 
-import os
-import sqlite3
-import hashlib
-import secrets
-import re
+import os, sqlite3, hashlib, secrets, re, time
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, request, redirect, url_for, session, send_file, render_template_string, jsonify, abort
+from flask import Flask, request, redirect, url_for, session, send_file, render_template_string, jsonify
 from werkzeug.utils import secure_filename
 
-# ============== CONFIGURATION ==============
+# ============== CONFIG ==============
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['ALLOWED_EXTENSIONS'] = {'png'}
-app.config['ADMIN_USERNAME'] = 'Admin'
-app.config['ADMIN_PASSWORD_HASH'] = os.environ.get('ADMIN_PASSWORD', 
-    hashlib.sha256('PhotoBoth_Secure_2026!@#'.encode()).hexdigest())
+app.config['PFP_FOLDER'] = 'pfp'
+app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'webp'}
+app.config['PFP_ALLOWED'] = {'png', 'jpg', 'jpeg'}
+# Brute-force protection settings
+app.config['MAX_LOGIN_ATTEMPTS'] = 5
+app.config['LOCKOUT_MINUTES'] = 15
+app.config['RATE_LIMIT_WINDOW'] = 60  # seconds
 
 DB_PATH = os.environ.get('DATABASE_URL', 'photoboth.db').replace('sqlite:///', '')
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+for folder in [app.config['UPLOAD_FOLDER'], app.config['PFP_FOLDER']]:
+    os.makedirs(folder, exist_ok=True)
 
-# ============== DATABASE SETUP ==============
+# ============== DATABASE ==============
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nickname TEXT UNIQUE NOT NULL,
-        ip_address TEXT,
-        is_banned INTEGER DEFAULT 0,
+        password_hash TEXT NOT NULL,
+        role TEXT DEFAULT 'user',
+        pfp_filename TEXT DEFAULT 'default.png',
+        status TEXT DEFAULT 'active',
         ban_until TEXT,
+        comment_banned_until TEXT,
+        last_seen TEXT,
+        ip_address TEXT,
+        failed_logins INTEGER DEFAULT 0,
+        locked_until TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS photos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         filename TEXT NOT NULL,
         original_name TEXT NOT NULL,
-        uploaded_by TEXT DEFAULT 'Admin',
+        title TEXT,
+        description TEXT,
+        privacy TEXT DEFAULT 'public',
+        uploader_id INTEGER,
         upload_date TEXT DEFAULT CURRENT_TIMESTAMP,
         views INTEGER DEFAULT 0,
         downloads INTEGER DEFAULT 0,
         likes INTEGER DEFAULT 0,
-        is_active INTEGER DEFAULT 1
+        is_active INTEGER DEFAULT 1,
+        FOREIGN KEY (uploader_id) REFERENCES users (id)
     )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS photo_access (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        photo_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        granted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(photo_id, user_id)
+    )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         photo_id INTEGER NOT NULL,
-        user_nickname TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
         content TEXT NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (photo_id) REFERENCES photos (id)
+        FOREIGN KEY (photo_id) REFERENCES photos (id),
+        FOREIGN KEY (user_id) REFERENCES users (id)
     )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS user_likes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         photo_id INTEGER NOT NULL,
-        user_nickname TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(photo_id, user_nickname)
+        UNIQUE(photo_id, user_id)
     )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS user_states (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         photo_id INTEGER NOT NULL,
-        user_nickname TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
         viewed INTEGER DEFAULT 0,
         downloaded INTEGER DEFAULT 0,
         last_viewed TEXT,
-        UNIQUE(photo_id, user_nickname)
+        UNIQUE(photo_id, user_id)
     )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS support_tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        guest_nick TEXT,
+        guest_email TEXT,
+        subject TEXT NOT NULL,
+        message TEXT NOT NULL,
+        status TEXT DEFAULT 'open',
+        admin_reply TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+    )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS ip_bans (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ip_address TEXT UNIQUE NOT NULL,
@@ -82,752 +121,1086 @@ def init_db():
         banned_until TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS login_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip_address TEXT NOT NULL,
+        nickname TEXT,
+        attempted_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
-    c.execute('INSERT OR IGNORE INTO settings (key, value) VALUES ("site_offline", "0")')
+    
+    for key, val in [("site_offline", "0"), ("maintenance_msg", "Site under maintenance")]:
+        c.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (key, val))
+    
+    # Migrations
+    for sql in [
+        'ALTER TABLE photos ADD COLUMN title TEXT',
+        'ALTER TABLE photos ADD COLUMN description TEXT',
+        'ALTER TABLE photos ADD COLUMN privacy TEXT DEFAULT "public"',
+        'ALTER TABLE users ADD COLUMN pfp_filename TEXT DEFAULT "default.png"',
+        'ALTER TABLE users ADD COLUMN comment_banned_until TEXT',
+        'ALTER TABLE users ADD COLUMN last_seen TEXT',
+        'ALTER TABLE users ADD COLUMN failed_logins INTEGER DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN locked_until TEXT',
+        'ALTER TABLE support_tickets ADD COLUMN guest_nick TEXT',
+        'ALTER TABLE support_tickets ADD COLUMN guest_email TEXT'
+    ]:
+        try: c.execute(sql)
+        except: pass
+    
+    # Default accounts
+    for nick, pwd, role in [('admin', 'PhotoBoth2026!', 'admin'), ('user', 'User123!', 'user')]:
+        c.execute('INSERT OR IGNORE INTO users (nickname, password_hash, role) VALUES (?, ?, ?)',
+                  (nick, hashlib.sha256(pwd.encode()).hexdigest(), role))
+    
+    # Default PFP
+    if not os.path.exists(os.path.join(app.config['PFP_FOLDER'], 'default.png')):
+        import base64
+        default_pfp = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==')
+        with open(os.path.join(app.config['PFP_FOLDER'], 'default.png'), 'wb') as f:
+            f.write(default_pfp)
+    
     conn.commit()
     conn.close()
 
 init_db()
 
-# ============== HELPER FUNCTIONS ==============
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+# ============== HELPERS ==============
+def hash_pwd(p): return hashlib.sha256(p.encode()).hexdigest()
+def allowed_file(fn): return '.' in fn and fn.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+def allowed_pfp(fn): return '.' in fn and fn.rsplit('.', 1)[1].lower() in app.config['PFP_ALLOWED']
+def get_ip(): return request.headers.get('X-Forwarded-For', request.remote_addr)
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def get_user_ip():
-    return request.headers.get('X-Forwarded-For', request.remote_addr)
-
-def is_ip_banned(ip):
+def get_user():
+    uid = session.get('user_id')
+    if not uid: return None
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT banned_until FROM ip_bans WHERE ip_address = ? AND (ban_until IS NULL OR ban_until > ?)', 
-              (ip, datetime.now().isoformat()))
-    result = c.fetchone()
+    conn.row_factory = sqlite3.Row
+    u = conn.execute('SELECT * FROM users WHERE id = ?', (uid,)).fetchone()
     conn.close()
-    return result is not None
+    return dict(u) if u else None
 
-def is_user_banned(nickname):
-    if not nickname:
-        return False
+def update_last_seen():
+    uid = session.get('user_id')
+    if uid:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('UPDATE users SET last_seen = ? WHERE id = ?', (datetime.now().isoformat(), uid))
+        conn.commit()
+        conn.close()
+
+# ============== BRUTE-FORCE PROTECTION ==============
+def check_rate_limit(ip):
+    """Check if IP is rate-limited for login attempts"""
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT is_banned, ban_until FROM users WHERE nickname = ?', (nickname,))
-    result = c.fetchone()
+    window = (datetime.now() - timedelta(seconds=app.config['RATE_LIMIT_WINDOW'])).isoformat()
+    count = conn.execute('SELECT COUNT(*) FROM login_attempts WHERE ip_address = ? AND attempted_at > ?', (ip, window)).fetchone()[0]
     conn.close()
-    if result and result[0]:
-        if result[1] and datetime.fromisoformat(result[1]) < datetime.now():
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute('UPDATE users SET is_banned = 0, ban_until = NULL WHERE nickname = ?', (nickname,))
-            conn.commit()
-            conn.close()
-            return False
+    return count >= 10  # 10 attempts per minute from same IP
+
+def record_login_attempt(ip, nickname=None):
+    """Record a login attempt for rate limiting"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('INSERT INTO login_attempts (ip_address, nickname) VALUES (?, ?)', (ip, nickname))
+    # Clean old attempts
+    cutoff = (datetime.now() - timedelta(hours=1)).isoformat()
+    conn.execute('DELETE FROM login_attempts WHERE attempted_at < ?', (cutoff,))
+    conn.commit()
+    conn.close()
+
+def check_account_lockout(nickname):
+    """Check if account is locked due to failed attempts"""
+    conn = sqlite3.connect(DB_PATH)
+    u = conn.execute('SELECT failed_logins, locked_until FROM users WHERE nickname = ?', (nickname,)).fetchone()
+    conn.close()
+    if not u: return False, 0
+    failed, locked = u[0], u[1]
+    if locked and datetime.fromisoformat(locked) > datetime.now():
+        return True, (datetime.fromisoformat(locked) - datetime.now()).seconds // 60
+    if failed >= app.config['MAX_LOGIN_ATTEMPTS']:
+        # Lock account
+        until = (datetime.now() + timedelta(minutes=app.config['LOCKOUT_MINUTES'])).isoformat()
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('UPDATE users SET locked_until = ? WHERE nickname = ?', (until, nickname))
+        conn.commit()
+        conn.close()
+        return True, app.config['LOCKOUT_MINUTES']
+    return False, 0
+
+def reset_login_attempts(nickname):
+    """Reset failed login counter on successful login"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE users SET failed_logins = 0, locked_until = NULL WHERE nickname = ?', (nickname,))
+    conn.commit()
+    conn.close()
+
+def increment_failed_login(nickname):
+    """Increment failed login counter"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE users SET failed_logins = failed_logins + 1 WHERE nickname = ?', (nickname,))
+    conn.commit()
+    conn.close()
+
+# ============== STATUS CHECKS ==============
+def is_banned(u):
+    if not u or u['status'] != 'active': return True
+    if u['status'] == 'banned' and (not u['ban_until'] or datetime.fromisoformat(u['ban_until']) > datetime.now()):
+        return True
+    return False
+
+def is_comment_banned(u):
+    if not u: return False
+    if u['comment_banned_until'] and datetime.fromisoformat(u['comment_banned_until']) > datetime.now():
         return True
     return False
 
 def is_site_offline():
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT value FROM settings WHERE key = "site_offline"')
-    result = c.fetchone()
+    r = conn.execute('SELECT value FROM settings WHERE key = "site_offline"').fetchone()
     conn.close()
-    return result and result[0] == '1'
+    return r and r[0] == '1'
 
-def get_db():
+def db_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 # ============== DECORATORS ==============
+def require_login(f):
+    @wraps(f)
+    def dec(*a, **kw):
+        if session.get('user_id'):
+            update_last_seen()
+            return f(*a, **kw)
+        return redirect(url_for('login', next=request.path))
+    return dec
+
 def require_admin(f):
     @wraps(f)
-    def decorated(*args, **kwargs):
-        if session.get('admin_logged_in'):
-            return f(*args, **kwargs)
-        return redirect(url_for('admin_login'))
-    return decorated
+    def dec(*a, **kw):
+        u = get_user()
+        if u and u['role'] == 'admin':
+            update_last_seen()
+            return f(*a, **kw)
+        return redirect(url_for('index'))
+    return dec
 
-def require_user(f):
+def check_access(f):
     @wraps(f)
-    def decorated(*args, **kwargs):
-        ip = get_user_ip()
-        if is_ip_banned(ip):
-            return render_template_string(OFFLINE_TEMPLATE, message="Your IP has been banned."), 403
-        if is_site_offline() and not session.get('admin_logged_in'):
-            return render_template_string(OFFLINE_TEMPLATE), 503
-        return f(*args, **kwargs)
-    return decorated
+    def dec(*a, **kw):
+        if request.method in ['HEAD', 'OPTIONS']: return f(*a, **kw)
+        update_last_seen()
+        if is_site_offline() and not (get_user() and get_user()['role'] == 'admin'):
+            return render_template_string(OFFLINE_TMPL, msg=os.environ.get('MAINTENANCE_MSG', 'Site offline')), 503
+        ip = get_ip()
+        conn = sqlite3.connect(DB_PATH)
+        banned = conn.execute('SELECT 1 FROM ip_bans WHERE ip_address = ? AND (banned_until IS NULL OR banned_until > ?)', (ip, datetime.now().isoformat())).fetchone()
+        conn.close()
+        if banned:
+            return render_template_string(OFFLINE_TMPL, msg="Access restricted"), 403
+        return f(*a, **kw)
+    return dec
 
-# ============== CSS (Regular String - No f-string) ==============
-BASE_CSS = '''
+# ============== MODERN CSS ==============
+CSS = '''
 <style>
 :root {
-  --primary: #6366f1; --primary-dark: #4f46e5; --secondary: #ec4899;
-  --bg-dark: #0f172a; --bg-card: #1e293b; --text: #f1f5f9; --text-muted: #94a3b8;
-  --success: #22c55e; --danger: #ef4444; --warning: #f59e0b;
+  --bg: #0a0e17; --bg-card: rgba(30, 35, 50, 0.7); --bg-hover: rgba(45, 52, 72, 0.9);
+  --border: rgba(100, 116, 139, 0.3); --primary: #7c3aed; --primary-glow: rgba(124, 58, 237, 0.4);
+  --success: #10b981; --danger: #ef4444; --warning: #f59e0b;
+  --text: #f1f5f9; --text-dim: #94a3b8; --text-link: #818cf8;
+  --glass: blur(12px) saturate(180%); --shadow: 0 8px 32px rgba(0,0,0,0.4);
+  --radius: 16px; --transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  background: linear-gradient(135deg, var(--bg-dark) 0%, #1e1b4b 100%);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: radial-gradient(1200px 600px at 10% -10%, rgba(124,58,237,0.15), transparent),
+              radial-gradient(800px 400px at 90% 10%, rgba(16,185,129,0.1), transparent),
+              var(--bg);
   color: var(--text); min-height: 100vh; line-height: 1.6;
+  background-attachment: fixed;
 }
-.container { max-width: 1200px; margin: 0 auto; padding: 1rem; }
-.header {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 1rem 0; border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 2rem;
+@keyframes pulse-glow { 0%,100%{box-shadow:0 0 20px var(--primary-glow)} 50%{box-shadow:0 0 35px var(--primary-glow)} }
+@keyframes slide-in { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+.container { max-width: 1400px; margin: 0 auto; padding: 0 20px; }
+header {
+  background: var(--bg-card); backdrop-filter: var(--glass);
+  border-bottom: 1px solid var(--border); padding: 14px 0; position: sticky; top: 0; z-index: 100;
+  box-shadow: var(--shadow);
 }
+.nav { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .logo {
-  font-size: 1.8rem; font-weight: 800;
-  background: linear-gradient(90deg, var(--primary), var(--secondary));
+  font-size: 22px; font-weight: 800; background: linear-gradient(135deg, #818cf8, #7c3aed, #10b981);
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  animation: pulse 3s infinite;
+  animation: pulse-glow 4s infinite;
 }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.8; } }
+.nav-links { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.nav-links a {
+  color: var(--text-dim); text-decoration: none; font-size: 14px; padding: 8px 14px;
+  border-radius: 10px; transition: var(--transition);
+}
+.nav-links a:hover { color: var(--text); background: var(--bg-hover); }
 .btn {
-  padding: 0.6rem 1.4rem; border: none; border-radius: 8px;
-  font-weight: 600; cursor: pointer; transition: all 0.2s;
-  display: inline-flex; align-items: center; gap: 0.5rem;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 20px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg-card); color: var(--text); cursor: pointer; font-size: 14px; font-weight: 500;
+  transition: var(--transition); backdrop-filter: var(--glass);
 }
-.btn-primary { background: var(--primary); color: white; }
-.btn-primary:hover { background: var(--primary-dark); transform: translateY(-2px); }
-.btn-danger { background: var(--danger); color: white; }
-.btn-sm { padding: 0.4rem 0.8rem; font-size: 0.85rem; }
+.btn:hover { background: var(--bg-hover); transform: translateY(-2px); }
+.btn:active { transform: scale(0.98); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--primary), #6d28d9);
+  border-color: rgba(124,58,237,0.5); color: white; box-shadow: 0 4px 14px var(--primary-glow);
+}
+.btn-primary:hover { box-shadow: 0 6px 20px var(--primary-glow); }
+.btn-danger { background: linear-gradient(135deg, var(--danger), #dc2626); border-color: rgba(239,68,68,0.4); color: white; }
+.btn-success { background: linear-gradient(135deg, var(--success), #059669); border-color: rgba(16,185,129,0.4); color: white; }
+.btn-warning { background: linear-gradient(135deg, var(--warning), #d97706); border-color: rgba(245,158,11,0.4); color: white; }
 .card {
-  background: var(--bg-card); border-radius: 16px; padding: 1.5rem;
-  margin-bottom: 1.5rem; box-shadow: 0 10px 25px rgba(0,0,0,0.3);
-  animation: slideUp 0.4s ease;
+  background: var(--bg-card); backdrop-filter: var(--glass);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 20px; margin-bottom: 20px; box-shadow: var(--shadow);
+  animation: slide-in 0.4s ease;
 }
-@keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-.photo-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 1.5rem; margin-top: 1rem;
-}
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; margin: 24px 0; }
 .photo-card {
-  background: var(--bg-card); border-radius: 16px; overflow: hidden;
-  transition: transform 0.3s, box-shadow 0.3s;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; transition: var(--transition); position: relative;
 }
-.photo-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
-.photo-img {
-  width: 100%; height: 220px; object-fit: cover;
-  background: linear-gradient(45deg, #334155, #475569);
-  display: flex; align-items: center; justify-content: center;
-  color: var(--text-muted); font-size: 3rem;
+.photo-card:hover { border-color: var(--primary); transform: translateY(-4px); box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
+.photo-badge {
+  position: absolute; top: 12px; right: 12px; padding: 4px 10px; border-radius: 20px;
+  font-size: 11px; font-weight: 600; backdrop-filter: blur(8px);
 }
-.photo-info { padding: 1rem; }
-.photo-stats {
-  display: flex; gap: 1rem; margin: 0.8rem 0; color: var(--text-muted); font-size: 0.9rem;
+.badge-private { background: rgba(245,158,11,0.2); color: var(--warning); border: 1px solid rgba(245,158,11,0.3); }
+.photo-img { width: 100%; height: 200px; object-fit: cover; background: linear-gradient(135deg, #1e293b, #334155); }
+.photo-meta { padding: 16px; }
+.photo-title { font-weight: 700; margin-bottom: 6px; font-size: 16px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.photo-desc { color: var(--text-dim); font-size: 13px; margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.stats { display: flex; gap: 14px; color: var(--text-dim); font-size: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.stats span { display: flex; align-items: center; gap: 4px; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.actions .btn { flex: 1; min-width: 70px; padding: 8px 12px; font-size: 13px; }
+.input-group { margin-bottom: 14px; }
+.input-group label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
+.input-group input, .input-group textarea, .input-group select {
+  width: 100%; padding: 12px 14px; background: rgba(15,23,42,0.6);
+  border: 1px solid var(--border); border-radius: 10px; color: var(--text);
+  font-size: 14px; transition: var(--transition);
 }
-.photo-stats span { display: flex; align-items: center; gap: 0.3rem; }
-.photo-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-.input-group { margin-bottom: 1rem; }
-.input-group label { display: block; margin-bottom: 0.4rem; color: var(--text-muted); }
-.input-group input, .input-group textarea {
-  width: 100%; padding: 0.8rem; border-radius: 8px;
-  border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.05);
-  color: var(--text); font-size: 1rem;
+.input-group input:focus, .input-group textarea:focus, .input-group select:focus {
+  outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow);
 }
-.input-group input:focus { outline: none; border-color: var(--primary); }
-.badge {
-  display: inline-block; padding: 0.25rem 0.6rem; border-radius: 20px;
-  font-size: 0.75rem; font-weight: 600; margin-right: 0.3rem;
-}
-.badge-success { background: rgba(34,197,94,0.2); color: var(--success); }
-.badge-warning { background: rgba(245,158,11,0.2); color: var(--warning); }
-.badge-danger { background: rgba(239,68,68,0.2); color: var(--danger); }
-.comments-section { margin-top: 1rem; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 1rem; }
-.comment { padding: 0.6rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
-.comment-header { display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-muted); }
 .modal {
   display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-  background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.7); z-index: 200; align-items: center; justify-content: center;
+  backdrop-filter: blur(4px); padding: 20px;
 }
-.modal.active { display: flex; animation: fadeIn 0.3s; }
-@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-.modal-content {
-  background: var(--bg-card); border-radius: 16px; padding: 2rem;
-  max-width: 500px; width: 90%; max-height: 90vh; overflow-y: auto;
+.modal.active { display: flex; animation: slide-in 0.3s ease; }
+.modal-box {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  width: 100%; max-width: 480px; max-height: 90vh; overflow: auto; padding: 24px;
+  box-shadow: var(--shadow); animation: slide-in 0.3s ease;
 }
-.toast {
-  position: fixed; bottom: 2rem; right: 2rem; padding: 1rem 1.5rem;
-  background: var(--bg-card); border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.3);
-  display: flex; align-items: center; gap: 0.8rem; z-index: 2000;
-  animation: slideIn 0.3s, fadeOut 0.3s 2.7s forwards;
+.modal-header { font-size: 20px; font-weight: 700; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+.error-msg { color: var(--danger); font-size: 13px; margin-top: 6px; display: block; }
+.success-msg { color: var(--success); font-size: 13px; margin-top: 6px; display: block; }
+.comments-section { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 16px; }
+.comment {
+  display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px dashed var(--border);
+  animation: slide-in 0.3s ease;
 }
-@keyframes slideIn { from { transform: translateX(100px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-@keyframes fadeOut { to { opacity: 0; transform: translateY(20px); } }
-.admin-panel { display: grid; grid-template-columns: 220px 1fr; gap: 2rem; }
-.admin-sidebar { background: var(--bg-card); border-radius: 16px; padding: 1.5rem; height: fit-content; }
-.admin-sidebar a {
-  display: block; padding: 0.6rem 1rem; border-radius: 8px; color: var(--text-muted);
-  text-decoration: none; transition: all 0.2s; margin-bottom: 0.3rem;
+.comment:last-child { border-bottom: none; }
+.comment-avatar {
+  width: 36px; height: 36px; border-radius: 50%; object-fit: cover;
+  border: 2px solid var(--border); flex-shrink: 0;
 }
-.admin-sidebar a:hover, .admin-sidebar a.active { background: var(--primary); color: white; }
-.table { width: 100%; border-collapse: collapse; }
-.table th, .table td { padding: 0.8rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
-.table th { color: var(--text-muted); font-weight: 600; font-size: 0.9rem; }
+.comment-body { flex: 1; min-width: 0; }
+.comment-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.comment-author { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+.verified-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  color: white; font-size: 10px; font-weight: 700;
+}
+.comment-time { color: var(--text-dim); font-size: 11px; }
+.comment-text { font-size: 14px; line-height: 1.5; word-wrap: break-word; }
+.load-more {
+  color: var(--text-link); font-size: 13px; cursor: pointer; margin-top: 8px;
+  background: none; border: none; padding: 6px 0; transition: var(--transition);
+}
+.load-more:hover { color: var(--primary); }
+.sidebar {
+  position: fixed; right: 0; top: 70px; width: 280px; height: calc(100vh - 70px);
+  background: var(--bg-card); backdrop-filter: var(--glass);
+  border-left: 1px solid var(--border); padding: 20px; overflow-y: auto;
+  box-shadow: -4px 0 20px rgba(0,0,0,0.3); z-index: 90;
+}
+.sidebar-title { font-size: 15px; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+.online-list { display: flex; flex-direction: column; gap: 10px; }
+.online-user {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  border-radius: 10px; transition: var(--transition); cursor: pointer;
+}
+.online-user:hover { background: var(--bg-hover); }
+.online-avatar {
+  width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
+  border: 2px solid var(--success); position: relative;
+}
+.online-avatar::after {
+  content: ''; position: absolute; bottom: 2px; right: 2px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--success); border: 2px solid var(--bg-card);
+}
+.online-name { font-size: 13px; font-weight: 500; flex: 1; }
+.online-role { font-size: 10px; padding: 2px 8px; border-radius: 10px; background: var(--primary); color: white; }
+.table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table th, .table td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
+.table th { color: var(--text-dim); font-weight: 600; }
+.badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+.badge-open { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.badge-resolved { background: rgba(16,185,129,0.15); color: #34d399; }
+.badge-admin { background: linear-gradient(135deg, var(--primary), #6d28d9); color: white; }
+.badge-banned { background: rgba(239,68,68,0.15); color: #f87171; }
+.admin-panel { display: grid; grid-template-columns: 240px 1fr; gap: 24px; margin-top: 24px; }
+.admin-nav a {
+  display: block; padding: 12px 16px; color: var(--text-dim); border-radius: 10px;
+  margin-bottom: 6px; transition: var(--transition); font-weight: 500;
+}
+.admin-nav a:hover, .admin-nav a.active { background: var(--bg-hover); color: var(--text); }
+.offline-msg { text-align: center; padding: 100px 20px; font-size: 18px; color: var(--text-dim); }
+.pfp-upload { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.pfp-preview {
+  width: 64px; height: 64px; border-radius: 50%; object-fit: cover;
+  border: 3px solid var(--primary); box-shadow: 0 4px 14px var(--primary-glow);
+}
+.main-content { margin-right: 300px; }
+.ticket-message {
+  background: rgba(15,23,42,0.4); padding: 12px; border-radius: 8px; margin: 8px 0;
+  font-size: 13px; white-space: pre-wrap; max-height: 150px; overflow-y: auto;
+}
+.admin-reply {
+  background: rgba(124,58,237,0.1); padding: 12px; border-radius: 8px; margin: 8px 0;
+  font-size: 13px; border-left: 3px solid var(--primary);
+}
+@media (max-width: 1100px) {
+  .sidebar { display: none; }
+  .main-content { margin-right: 0; }
+  .grid { grid-template-columns: 1fr 1fr; }
+}
 @media (max-width: 768px) {
+  .container { padding: 0 12px; }
+  .nav { flex-wrap: wrap; }
+  .nav-links { width: 100%; justify-content: center; margin-top: 10px; }
+  .grid { grid-template-columns: 1fr; }
+  .photo-img { height: 220px; }
   .admin-panel { grid-template-columns: 1fr; }
-  .photo-grid { grid-template-columns: 1fr; }
+  .admin-nav { display: flex; overflow-x: auto; padding-bottom: 10px; gap: 6px; }
+  .admin-nav a { white-space: nowrap; padding: 10px 14px; }
+  .btn { width: 100%; margin-bottom: 8px; }
+  .actions .btn { min-width: auto; }
+  input, textarea, select, button { font-size: 16px !important; }
+  .modal-box { margin: 10px; }
 }
 </style>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 '''
 
-# ============== JS (Regular String) ==============
-BASE_JS = '''
+JS = '''
 <script>
-function showToast(message, type = 'info') {
-  const toast = document.createElement('div');
-  toast.className = 'toast';
-  toast.innerHTML = '<span>' + message + '</span>';
-  document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 3000);
+function showModal(id){document.getElementById(id).classList.add('active');}
+function hideModal(id){document.getElementById(id).classList.remove('active');}
+async function likePhoto(id){
+  const r=await fetch('/api/like/'+id,{method:'POST'});const d=await r.json();
+  if(d.ok){document.getElementById('likes-'+id).textContent=d.likes;}
+  else{alert(d.error);}
 }
-async function likePhoto(photoId) {
-  const res = await fetch('/api/like/' + photoId, { method: 'POST' });
-  const data = await res.json();
-  if (data.success) {
-    document.getElementById('likes-' + photoId).textContent = data.likes;
-    showToast('❤️ Liked!', 'success');
-  } else {
-    showToast(data.error || 'Already liked', 'warning');
-  }
+function trackDownload(id,file){fetch('/api/download/'+id,{method:'POST'});setTimeout(()=>window.location.href='/uploads/'+file,100);}
+async function trackView(id){await fetch('/api/view/'+id,{method:'POST'});}
+function toggleComments(id){
+  const s=document.getElementById('comments-'+id),b=document.getElementById('btn-comments-'+id);
+  if(s.style.display==='none'){s.style.display='block';b.textContent='Hide Comments';}
+  else{s.style.display='none';b.textContent='Show Comments';}
 }
-async function trackView(photoId) {
-  await fetch('/api/view/' + photoId, { method: 'POST' });
-}
-function trackDownload(photoId, filename) {
-  fetch('/api/download/' + photoId, { method: 'POST' });
-  setTimeout(() => window.location.href = '/uploads/' + filename, 100);
-}
-function openModal(id) { document.getElementById(id).classList.add('active'); }
-function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-document.querySelectorAll('form').forEach(form => {
-  form.addEventListener('submit', async (e) => {
-    const fileInput = form.querySelector('input[type="file"]');
-    if (fileInput && fileInput.files[0]) {
-      const ext = fileInput.files[0].name.split('.').pop().toLowerCase();
-      if (ext !== 'png') {
-        e.preventDefault();
-        showToast('Only PNG files allowed!', 'error');
-      }
+document.querySelectorAll('form').forEach(f=>{
+  f.addEventListener('submit',e=>{
+    const fi=f.querySelector('input[type="file"]');
+    if(fi&&fi.files[0]){
+      const ext=fi.files[0].name.split('.').pop().toLowerCase();
+      if(!['png','jpg','jpeg','webp'].includes(ext)){e.preventDefault();alert('Allowed: PNG, JPG, JPEG, WEBP');}
     }
   });
 });
-document.querySelectorAll('.photo-card').forEach(card => {
-  const photoId = card.dataset.photoId;
-  if (photoId) trackView(photoId);
-});
+document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('active');}));
+setInterval(()=>{fetch('/api/online').then(r=>r.text()).then(d=>{if(document.getElementById('online-list'))document.getElementById('online-list').innerHTML=d;});},30000);
 </script>
 '''
 
-# ============== TEMPLATES (Regular strings + Jinja2 syntax) ==============
-OFFLINE_TEMPLATE = '''<!DOCTYPE html>
-<html><head><title>PhotoBoth - Offline</title>''' + BASE_CSS + '''</head>
-<body><div class="container" style="text-align:center;padding-top:100px">
-  <h1 style="font-size:3rem;margin-bottom:1rem">🔧 {% if message %}{{ message }}{% else %}Site Offline{% endif %}</h1>
-  <p style="color:var(--text-muted);margin-bottom:2rem">We'll be back soon! Check back later.</p>
-  <a href="/" class="btn btn-primary">Refresh</a>
-</div></body></html>'''
+OFFLINE_TMPL = '<!DOCTYPE html><html><head><title>PhotoBoth</title>'+CSS+'</head><body><div class="offline-msg"><h1 style="font-size:28px;margin-bottom:16px">🔧 {% if msg %}{{ msg }}{% else %}Site Offline{% endif %}</h1><p style="color:var(--text-dim)">We will return shortly.</p></div></body></html>'
 
-LOGIN_TEMPLATE = '''<!DOCTYPE html>
-<html><head><title>PhotoBoth - Login</title>''' + BASE_CSS + '''</head>
-<body>
-<div class="container" style="max-width:400px;margin:100px auto">
-  <div class="card">
-    <h2 style="text-align:center;margin-bottom:1.5rem">🔐 Admin Login</h2>
-    <form method="POST" action="/adminui/login">
-      <div class="input-group">
-        <label>Username</label>
-        <input type="text" name="username" required autocomplete="username">
-      </div>
-      <div class="input-group">
-        <label>Password</label>
-        <input type="password" name="password" required autocomplete="current-password">
-      </div>
-      <button type="submit" class="btn btn-primary" style="width:100%">Sign In</button>
+LOGIN_TMPL = '''<!DOCTYPE html><html><head><title>Login</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
+<div class="container" style="max-width:440px;margin:80px auto">
+  <div class="modal-box" style="margin:0">
+    <h2 class="modal-header">Welcome Back</h2>
+    <form method="POST">
+      <div class="input-group"><label>Nickname</label><input type="text" name="nickname" required autocomplete="username"></div>
+      <div class="input-group"><label>Password</label><input type="password" name="password" required autocomplete="current-password"></div>
+      {% if error %}<span class="error-msg">{{ error }}</span>{% endif %}
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:16px">Sign In</button>
     </form>
-    <p style="text-align:center;margin-top:1rem;color:var(--text-muted);font-size:0.9rem">
-      <a href="/" style="color:var(--primary);text-decoration:none">← Back to Gallery</a>
+    <p style="margin-top:20px;font-size:13px;color:var(--text-dim);text-align:center">
+      New here? <a href="/register" style="color:var(--text-link)">Create account</a> • 
+      <a href="/support" style="color:var(--text-link)">Need help?</a>
     </p>
   </div>
-</div>
-''' + BASE_JS + '''</body></html>'''
+</div></body></html>'''
 
-MAIN_TEMPLATE = '''<!DOCTYPE html>
-<html><head><title>PhotoBoth</title><meta name="viewport" content="width=device-width,initial-scale=1">''' + BASE_CSS + '''</head>
-<body>
-<div class="container">
-  <div class="header">
-    <div class="logo">📸 PhotoBoth</div>
-    <div style="display:flex;gap:1rem;align-items:center">
-      {% if session.nickname %}
-        <span style="color:var(--text-muted)">👤 {{ session.nickname }}</span>
-        <a href="/logout" class="btn btn-sm btn-danger">Logout</a>
-      {% else %}
-        <button class="btn btn-primary" onclick="openModal('nicknameModal')">Set Nickname</button>
-      {% endif %}
-      <a href="/adminui" class="btn btn-sm" style="background:rgba(255,255,255,0.1)">Admin</a>
-    </div>
-  </div>
-
-  {% if session.admin_logged_in %}
-  <div class="card">
-    <h3>📤 Upload Photo (PNG Only)</h3>
-    <form method="POST" action="/adminui/upload" enctype="multipart/form-data" style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:1rem">
-      <input type="file" name="file" accept=".png" required style="flex:1;min-width:200px">
-      <button type="submit" class="btn btn-primary">Upload</button>
+REGISTER_TMPL = '''<!DOCTYPE html><html><head><title>Register</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
+<div class="container" style="max-width:440px;margin:80px auto">
+  <div class="modal-box" style="margin:0">
+    <h2 class="modal-header">Create Account</h2>
+    <form method="POST" enctype="multipart/form-data">
+      <div class="input-group"><label>Nickname</label><input type="text" name="nickname" required pattern="[a-zA-Z0-9_]{3,20}" autocomplete="username"></div>
+      <div class="input-group"><label>Password</label><input type="password" name="password" required minlength="6" autocomplete="new-password"></div>
+      <div class="input-group"><label>Confirm</label><input type="password" name="confirm" required autocomplete="new-password"></div>
+      <div class="input-group"><label>Profile Picture (optional)</label><input type="file" name="pfp" accept=".png,.jpg,.jpeg"></div>
+      {% if error %}<span class="error-msg">{{ error }}</span>{% endif %}
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:16px">Register</button>
     </form>
+    <p style="margin-top:20px;font-size:13px;color:var(--text-dim);text-align:center">Have an account? <a href="/login" style="color:var(--text-link)">Sign In</a></p>
   </div>
-  {% endif %}
+</div></body></html>'''
 
-  <div class="photo-grid">
-    {% for photo in photos %}
-    <div class="photo-card" data-photo-id="{{ photo.id }}">
-      <div class="photo-img" style="background-image:url('/uploads/{{ photo.filename }}');background-size:cover;background-position:center"></div>
-      <div class="photo-info">
-        <strong>{{ photo.original_name }}</strong>
-        <div class="photo-stats">
-          <span>👁️ <span id="views-{{ photo.id }}">{{ photo.views }}</span></span>
-          <span>⬇️ <span id="downloads-{{ photo.id }}">{{ photo.downloads }}</span></span>
-          <span>❤️ <span id="likes-{{ photo.id }}">{{ photo.likes }}</span></span>
+MAIN_TMPL = '''<!DOCTYPE html><html><head><title>PhotoBoth</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
+<header><div class="container nav">
+  <a href="/" class="logo">✨ PhotoBoth</a>
+  <div class="nav-links">
+    <a href="/support">Support</a>
+    {% if user and user.role=='admin' %}<a href="/admin">Dashboard</a>{% endif %}
+    {% if user %}
+      <div style="display:flex;align-items:center;gap:8px">
+        <img src="/pfp/{{ user.pfp_filename }}" class="online-avatar" style="width:28px;height:28px;border:none">
+        <span style="font-size:13px">{{ user.nickname }}</span>
+      </div>
+      <a href="/profile" class="btn">Profile</a>
+      <a href="/logout" class="btn btn-danger">Sign Out</a>
+    {% else %}
+      <a href="/login" class="btn btn-primary">Sign In</a>
+    {% endif %}
+  </div>
+</div></header>
+
+<div class="container" style="display:flex;gap:24px">
+  <div class="main-content" style="flex:1">
+    {% if user and user.role=='admin' %}
+    <div class="card">
+      <h3 style="margin-bottom:16px;font-size:18px">📤 Upload Image</h3>
+      <form method="POST" action="/upload" enctype="multipart/form-data">
+        <div class="input-group"><label>Image File</label><input type="file" name="file" accept=".png,.jpg,.jpeg,.webp" required></div>
+        <div class="input-group"><label>Title</label><input type="text" name="title" placeholder="Give your image a title..." maxlength="100"></div>
+        <div class="input-group"><label>Description</label><textarea name="desc" rows="2" placeholder="Add a description..." maxlength="300"></textarea></div>
+        <div class="input-group"><label>Privacy</label>
+          <select name="privacy">
+            <option value="public">🌐 Public - Everyone can see</option>
+            <option value="private">🔒 Private - Only selected users</option>
+          </select>
         </div>
-        <div class="photo-actions">
-          <button class="btn btn-sm btn-primary" onclick="likePhoto({{ photo.id }})">Like</button>
-          <button class="btn btn-sm" onclick="trackDownload({{ photo.id }}, '{{ photo.filename }}')">Download</button>
-          <button class="btn btn-sm" onclick="openModal('commentModal-{{ photo.id }}')">💬 Comment</button>
+        <div id="private-users" class="input-group" style="display:none">
+          <label>Allow these users (comma-separated nicknames)</label>
+          <input type="text" name="allowed_users" placeholder="user1, user2, admin">
         </div>
-        
-        <div class="comments-section">
-          {% for comment in comments.get(photo.id, []) %}
-          <div class="comment">
-            <div class="comment-header">
-              <strong>{{ comment.user_nickname }}</strong>
-              <span>{{ comment.created_at[:10] }}</span>
-            </div>
-            <p style="font-size:0.95rem">{{ comment.content }}</p>
-            {% if session.admin_logged_in %}
-            <form method="POST" action="/adminui/comment/delete/{{ comment.id }}" style="display:inline">
-              <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Delete comment?')">🗑️</button>
-            </form>
+        <button type="submit" class="btn btn-primary">Upload</button>
+      </form>
+    </div>
+    <script>document.querySelector('select[name="privacy"]').addEventListener('change',e=>{document.getElementById('private-users').style.display=e.target.value==='private'?'block':'none';});</script>
+    {% endif %}
+
+    <div class="grid">
+      {% for photo in photos %}
+      <div class="photo-card" data-id="{{ photo.id }}">
+        {% if photo.privacy=='private' %}<span class="photo-badge badge-private">🔒 Private</span>{% endif %}
+        <div class="photo-img" style="background-image:url('/uploads/{{ photo.filename }}');background-size:cover;background-position:center"></div>
+        <div class="photo-meta">
+          <div class="photo-title">{{ photo.title or photo.original_name }}</div>
+          {% if photo.description %}<div class="photo-desc">{{ photo.description }}</div>{% endif %}
+          <div class="stats">
+            <span>👁️ <span id="views-{{ photo.id }}">{{ photo.views }}</span></span>
+            <span>⬇️ <span id="downloads-{{ photo.id }}">{{ photo.downloads }}</span></span>
+            <span>❤️ <span id="likes-{{ photo.id }}">{{ photo.likes }}</span></span>
+          </div>
+          <div class="actions">
+            {% if user %}
+              <button class="btn" onclick="likePhoto({{ photo.id }})">Like</button>
+              <button class="btn" onclick="trackDownload({{ photo.id }}, '{{ photo.filename }}')">Download</button>
+            {% else %}
+              <a href="/login" class="btn" style="flex:1">Sign in to interact</a>
             {% endif %}
           </div>
-          {% endfor %}
+          <div class="comments-section">
+            <div id="comments-{{ photo.id }}" style="display:none">
+              {% for c in photo.comments %}
+              <div class="comment">
+                <img src="/pfp/{{ c.pfp }}" class="comment-avatar" alt="">
+                <div class="comment-body">
+                  <div class="comment-header">
+                    <span class="comment-author">
+                      {{ c.nick }}
+                      {% if c.is_admin %}<span class="verified-badge" title="Verified Admin">✓</span>{% endif %}
+                    </span>
+                    <span class="comment-time">{{ c.created_at[:10] }}</span>
+                  </div>
+                  <div class="comment-text">{{ c.content }}</div>
+                </div>
+              </div>
+              {% endfor %}
+              {% if photo.comments|length < photo.comment_count %}<div style="color:var(--text-dim);font-size:12px;margin-top:6px">+ {{ photo.comment_count - photo.comments|length }} more</div>{% endif %}
+            </div>
+            <button class="load-more" id="btn-comments-{{ photo.id }}" onclick="toggleComments({{ photo.id }})">Show Comments</button>
+            {% if user and not user.comment_banned %}
+            <form method="POST" action="/comment/{{ photo.id }}" style="margin-top:12px;display:flex;gap:8px">
+              <input type="text" name="content" placeholder="Add a comment..." required style="flex:1">
+              <button type="submit" class="btn">Post</button>
+            </form>
+            {% elif user and user.comment_banned %}
+            <p style="font-size:12px;color:var(--warning);margin-top:8px">⚠️ Commenting restricted</p>
+            {% endif %}
+          </div>
         </div>
       </div>
+      {% endfor %}
     </div>
-    
-    <div class="modal" id="commentModal-{{ photo.id }}">
-      <div class="modal-content">
-        <h4>💬 Add Comment</h4>
-        <form method="POST" action="/comment/{{ photo.id }}" style="margin-top:1rem">
-          <div class="input-group">
-            <textarea name="content" rows="3" placeholder="Write a comment..." required></textarea>
-          </div>
-          <div style="display:flex;gap:0.5rem;justify-content:flex-end">
-            <button type="button" class="btn btn-sm" onclick="closeModal('commentModal-{{ photo.id }}')">Cancel</button>
-            <button type="submit" class="btn btn-sm btn-primary">Post</button>
-          </div>
-        </form>
+  </div>
+
+  <!-- Online Users Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-title">🟢 Online Now ({{ online_count }})</div>
+    <div class="online-list" id="online-list">
+      {% for u in online_users %}
+      <div class="online-user">
+        <img src="/pfp/{{ u.pfp }}" class="online-avatar" alt="">
+        <span class="online-name">{{ u.nick }}</span>
+        {% if u.role=='admin' %}<span class="online-role">ADMIN</span>{% endif %}
       </div>
+      {% endfor %}
     </div>
-    {% endfor %}
-  </div>
+  </aside>
 </div>
-
-<div class="modal" id="nicknameModal">
-  <div class="modal-content">
-    <h3>👋 Choose Your Nickname</h3>
-    <p style="color:var(--text-muted);margin:0.5rem 0 1rem">This will identify you for likes and comments</p>
-    <form method="POST" action="/set-nickname">
-      <div class="input-group">
-        <input type="text" name="nickname" placeholder="Enter unique nickname" required pattern="[a-zA-Z0-9_]{3,20}" title="3-20 chars, letters/numbers/underscores">
-      </div>
-      <div style="display:flex;gap:0.5rem;justify-content:flex-end">
-        <button type="submit" class="btn btn-primary">Save Nickname</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-''' + BASE_JS + '''
-<script>
-document.querySelectorAll('.modal').forEach(modal => {
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) modal.classList.remove('active');
-  });
-});
-</script>
+'''+JS+'''<script>document.querySelectorAll('.photo-card').forEach(c=>{if(c.dataset.id)trackView(c.dataset.id);});</script>
 </body></html>'''
 
-ADMIN_TEMPLATE = '''<!DOCTYPE html>
-<html><head><title>PhotoBoth Admin</title><meta name="viewport" content="width=device-width,initial-scale=1">''' + BASE_CSS + '''</head>
-<body>
-<div class="container">
-  <div class="header">
-    <div class="logo">⚙️ Admin Panel</div>
-    <a href="/" class="btn btn-sm">← Gallery</a>
-  </div>
-  
-  <div class="admin-panel">
-    <div class="admin-sidebar">
-      <a href="#photos" class="active">📸 Photos</a>
-      <a href="#users">👥 Users</a>
-      <a href="#bans">🚫 Bans</a>
-      <a href="#settings">⚙️ Settings</a>
-      <a href="/adminui/logout" style="margin-top:2rem;color:var(--danger)">🚪 Logout</a>
-    </div>
+ADMIN_TMPL = '''<!DOCTYPE html><html><head><title>Admin</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
+<header><div class="container nav"><a href="/" class="logo">⚙️ Admin Panel</a><div class="nav-links"><a href="/">Site</a><a href="/logout">Sign Out</a></div></div></header>
+<div class="container admin-panel">
+  <nav class="admin-nav card">
+    <a href="#photos" class="active">📸 Photos</a>
+    <a href="#users">👥 Users</a>
+    <a href="#banned">🚫 Banned</a>
+    <a href="#tickets">🎫 Tickets</a>
+    <a href="#settings">⚙️ Settings</a>
+  </nav>
+  <div>
+    <section id="photos" class="card">
+      <h3>Manage Photos</h3>
+      <table class="table"><thead><tr><th>Image</th><th>Title</th><th>Privacy</th><th>Stats</th><th>Actions</th></tr></thead><tbody>
+      {% for p in photos %}<tr><td><img src="/uploads/{{ p.filename }}" style="width:50px;height:50px;object-fit:cover;border-radius:8px"></td>
+      <td>{{ p.title or p.original_name }}</td><td><span class="badge {% if p.privacy=='private' %}badge-open{% else %}badge-resolved{% endif %}">{{ p.privacy }}</span></td>
+      <td>{{ p.views }}v/{{ p.downloads }}d/{{ p.likes }}l</td>
+      <td><form method="POST" action="/admin/photo/{{ p.id }}/delete" onsubmit="return confirm('Delete?')"><button class="btn btn-danger">Delete</button></form></td></tr>{% endfor %}</tbody></table>
+    </section>
     
-    <div>
-      <div id="photos" class="card">
-        <h3>Manage Photos</h3>
-        <table class="table">
-          <thead><tr><th>Image</th><th>Name</th><th>Stats</th><th>Actions</th></tr></thead>
-          <tbody>
-            {% for photo in photos %}
-            <tr>
-              <td><img src="/uploads/{{ photo.filename }}" style="width:50px;height:50px;object-fit:cover;border-radius:4px"></td>
-              <td>{{ photo.original_name }}<br><small style="color:var(--text-muted)">{{ photo.uploaded_by }}</small></td>
-              <td>👁️{{ photo.views }} ⬇️{{ photo.downloads }} ❤️{{ photo.likes }}</td>
-              <td>
-                <form method="POST" action="/adminui/photo/delete/{{ photo.id }}" style="display:inline" onsubmit="return confirm('Delete this photo?')">
-                  <button type="submit" class="btn btn-sm btn-danger">🗑️</button>
-                </form>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      
-      <div id="users" class="card">
-        <h3>Manage Users</h3>
-        <table class="table">
-          <thead><tr><th>Nickname</th><th>IP</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody>
-            {% for user in users %}
-            <tr>
-              <td>{{ user.nickname }}</td>
-              <td><small>{{ user.ip_address }}</small></td>
-              <td>
-                {% if user.is_banned %}
-                  <span class="badge badge-danger">Banned</span>
-                {% else %}
-                  <span class="badge badge-success">Active</span>
-                {% endif %}
-              </td>
-              <td style="display:flex;gap:0.3rem;flex-wrap:wrap">
-                <form method="POST" action="/adminui/user/ban/{{ user.nickname }}" style="display:inline">
-                  <button type="submit" class="btn btn-sm btn-danger" title="Ban">🔒</button>
-                </form>
-                <form method="POST" action="/adminui/user/timeout/{{ user.nickname }}" style="display:inline">
-                  <button type="submit" class="btn btn-sm btn-warning" title="24h Timeout">⏱️</button>
-                </form>
-                <form method="POST" action="/adminui/user/ipban/{{ user.ip_address }}" style="display:inline" onsubmit="return confirm('Ban this IP?')">
-                  <button type="submit" class="btn btn-sm" style="background:#7c3aed" title="IP Ban">🌐</button>
-                </form>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      
-      <div id="bans" class="card">
-        <h3>Active Bans</h3>
-        <table class="table">
-          <thead><tr><th>Type</th><th>Target</th><th>Until</th><th>Actions</th></tr></thead>
-          <tbody>
-            {% for ban in ip_bans %}
-            <tr>
-              <td><span class="badge badge-danger">IP</span></td>
-              <td>{{ ban.ip_address }}</td>
-              <td>{{ ban.banned_until or 'Permanent' }}</td>
-              <td>
-                <form method="POST" action="/adminui/ban/remove/{{ ban.id }}" style="display:inline">
-                  <button type="submit" class="btn btn-sm" style="background:var(--success)">✅ Unban</button>
-                </form>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      
-      <div id="settings" class="card">
-        <h3>Site Settings</h3>
-        <div style="display:flex;align-items:center;gap:1rem;padding:1rem;background:rgba(255,255,255,0.05);border-radius:12px">
-          <div style="flex:1">
-            <strong>🔌 Site Status</strong>
-            <p style="color:var(--text-muted);font-size:0.9rem">Put the website in offline mode</p>
-          </div>
-          <form method="POST" action="/adminui/toggle-offline">
-            <button type="submit" class="btn {% if site_offline %}btn-danger{% else %}btn-success{% endif %}" 
-                    style="background:{% if site_offline %}var(--danger){% else %}var(--success){% endif %}">
-              {% if site_offline %}Bring Online{% else %}Take Offline{% endif %}
-            </button>
-          </form>
+    <section id="users" class="card">
+      <h3>User Management</h3>
+      <table class="table"><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Controls</th></tr></thead><tbody>
+      {% for u in users %}<tr><td><div style="display:flex;align-items:center;gap:10px"><img src="/pfp/{{ u.pfp }}" style="width:32px;height:32px;border-radius:50%">{{ u.nickname }}</div></td>
+      <td>{% if u.role=='admin' %}<span class="badge badge-admin">ADMIN</span>{% else %}User{% endif %}</td>
+      <td><span class="badge {% if u.status=='active' %}badge-resolved{% else %}badge-banned{% endif %}">{{ u.status }}</span></td>
+      <td style="display:flex;gap:6px;flex-wrap:wrap">
+        {% if u.role!='admin' %}
+        <form method="POST" action="/admin/user/{{ u.id }}/ban"><button class="btn btn-danger">Ban</button></form>
+        <form method="POST" action="/admin/user/{{ u.id }}/timeout"><button class="btn btn-warning">24h</button></form>
+        <form method="POST" action="/admin/user/{{ u.id }}/comment-ban"><button class="btn" style="background:var(--text-dim)">No Comments</button></form>
+        <form method="POST" action="/admin/user/{{ u.id }}/promote"><button class="btn btn-success">Promote</button></form>
+        {% endif %}
+      </td></tr>{% endfor %}</tbody></table>
+    </section>
+    
+    <!-- NEW: Banned Users Management -->
+    <section id="banned" class="card">
+      <h3>🚫 Banned Users</h3>
+      {% if banned_users %}
+      <table class="table"><thead><tr><th>User</th><th>Banned Until</th><th>Reason</th><th>Action</th></tr></thead><tbody>
+      {% for u in banned_users %}<tr><td>{{ u.nickname }}</td>
+      <td>{% if u.ban_until %}{{ u.ban_until[:16] }}{% else %}Permanent{% endif %}</td>
+      <td>{{ u.ban_reason or 'Admin action' }}</td>
+      <td><form method="POST" action="/admin/user/{{ u.id }}/unban"><button class="btn btn-success">Unban</button></form></td></tr>{% endfor %}</tbody></table>
+      {% else %}
+      <p style="color:var(--text-dim);padding:20px;text-align:center">No banned users.</p>
+      {% endif %}
+    </section>
+    
+    <section id="tickets" class="card">
+      <h3>Support Tickets</h3>
+      {% if tickets %}
+      <table class="table"><thead><tr><th>User</th><th>Subject</th><th>Status</th><th>Message</th><th>Reply</th></tr></thead><tbody>
+      {% for t in tickets %}<tr><td>{{ t.nick or t.guest_nick }}</td><td>{{ t.subject }}</td><td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
+      <td><div class="ticket-message">{{ t.message }}</div>{% if t.guest_email %}<small style="color:var(--text-dim)">📧 {{ t.guest_email }}</small>{% endif %}</td>
+      <td>
+        <form method="POST" action="/admin/ticket/{{ t.id }}/reply" style="display:flex;flex-direction:column;gap:6px">
+          <textarea name="reply" placeholder="Admin response..." required style="min-height:60px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-canvas);color:var(--text)"></textarea>
+          <button class="btn btn-primary">Send Reply</button>
+        </form>
+        {% if t.admin_reply %}<div class="admin-reply"><strong>Admin:</strong> {{ t.admin_reply }}</div>{% endif %}
+      </td></tr>{% endfor %}</tbody></table>
+      {% else %}
+      <p style="color:var(--text-dim);padding:20px;text-align:center">No open tickets.</p>
+      {% endif %}
+    </section>
+    
+    <section id="settings" class="card">
+      <h3>Site Controls</h3>
+      <div style="display:grid;gap:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:16px;background:rgba(124,58,237,0.1);border-radius:12px">
+          <div><strong>🔌 Site Status</strong><p style="color:var(--text-dim);font-size:13px">Toggle maintenance mode</p></div>
+          <form method="POST" action="/admin/toggle-offline"><button class="btn {% if offline %}btn-primary{% else %}btn-danger{% endif %}">{% if offline %}Bring Online{% else %}Take Offline{% endif %}</button></form>
         </div>
+        <div class="input-group"><label>Maintenance Message</label><form method="POST" action="/admin/set-maintenance"><textarea name="msg" rows="2" style="width:100%">{{ maint_msg }}</textarea><button class="btn btn-primary" style="margin-top:8px">Update</button></form></div>
       </div>
-    </div>
+    </section>
   </div>
-</div>
-''' + BASE_JS + '''</body></html>'''
+</div></body></html>'''
+
+SUPPORT_TMPL = '''<!DOCTYPE html><html><head><title>Support</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
+<div class="container" style="max-width:640px;margin:60px auto">
+  <div class="card">
+    <h2 style="margin-bottom:20px;font-size:22px">🎫 Support Center</h2>
+    {% if not user %}
+    <div class="input-group"><label>Your Nickname (optional)</label><input type="text" name="guest_nick" id="guest_nick"></div>
+    <div class="input-group"><label>Contact Email (for password reset)</label><input type="email" name="email"></div>
+    {% endif %}
+    <div class="input-group"><label>Subject</label><select name="subject">
+      <option value="Password Reset">🔐 Password Reset</option>
+      <option value="Account Issue">⚠️ Account Issue</option>
+      <option value="Bug Report">🐛 Bug Report</option>
+      <option value="Feature Request">💡 Feature Request</option>
+      <option value="Other">❓ Other</option>
+    </select></div>
+    <div class="input-group"><label>Message</label><textarea name="message" rows="5" placeholder="Describe your issue in detail..." required></textarea></div>
+    {% if error %}<span class="error-msg">{{ error }}</span>{% endif %}
+    {% if success %}<span class="success-msg">✓ Ticket submitted! An admin will review and respond within the dashboard.</span>{% endif %}
+    <form method="POST"><button type="submit" class="btn btn-primary" style="width:100%;margin-top:16px">Submit Ticket</button></form>
+    <p style="margin-top:20px;font-size:12px;color:var(--text-dim);text-align:center">
+      Tickets are managed internally. Admins will respond via the admin panel.
+    </p>
+  </div>
+</div></body></html>'''
+
+PROFILE_TMPL = '''<!DOCTYPE html><html><head><title>Profile</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
+<header><div class="container nav"><a href="/" class="logo">✨ PhotoBoth</a><div class="nav-links"><a href="/">Home</a><a href="/logout" class="btn btn-danger">Sign Out</a></div></div></header>
+<div class="container" style="max-width:600px;margin:60px auto">
+  <div class="card">
+    <h2 style="margin-bottom:24px">👤 Your Profile</h2>
+    <div class="pfp-upload">
+      <img src="/pfp/{{ user.pfp_filename }}" class="pfp-preview" alt="Profile">
+      <form method="POST" enctype="multipart/form-data" style="flex:1">
+        <div class="input-group"><label>Change Profile Picture</label><input type="file" name="pfp" accept=".png,.jpg,.jpeg"></div>
+        <button type="submit" class="btn btn-primary">Update</button>
+      </form>
+    </div>
+    <div class="input-group"><label>Nickname</label><input type="text" value="{{ user.nickname }}" disabled style="background:rgba(15,23,42,0.3)"></div>
+    <div class="input-group"><label>Role</label><input type="text" value="{{ user.role|upper }}" disabled style="background:rgba(15,23,42,0.3)"></div>
+    <div class="input-group"><label>Member Since</label><input type="text" value="{{ user.created_at[:10] }}" disabled style="background:rgba(15,23,42,0.3)"></div>
+    {% if user.comment_banned_until %}
+    <p style="color:var(--warning);font-size:13px;margin-top:12px">⚠️ Commenting restricted until: {{ user.comment_banned_until[:10] }}</p>
+    {% endif %}
+  </div>
+</div></body></html>'''
 
 # ============== ROUTES ==============
 @app.route('/')
-@require_user
+@check_access
 def index():
-    conn = get_db()
-    photos = conn.execute('SELECT * FROM photos WHERE is_active = 1 ORDER BY upload_date DESC').fetchall()
-    comments = {}
-    for photo in photos:
-        comments[photo['id']] = conn.execute(
-            'SELECT * FROM comments WHERE photo_id = ? ORDER BY created_at DESC LIMIT 5', 
-            (photo['id'],)
-        ).fetchall()
-    conn.close()
-    return render_template_string(MAIN_TEMPLATE, photos=photos, comments=comments, session=session)
+    user = get_user()
+    db = db_conn()
+    
+    if user and user['role'] == 'admin':
+        photos = db.execute('SELECT * FROM photos WHERE is_active=1 ORDER BY upload_date DESC').fetchall()
+    elif user:
+        photos = db.execute('''SELECT p.* FROM photos p 
+            LEFT JOIN photo_access pa ON p.id=pa.photo_id AND pa.user_id=? 
+            WHERE p.is_active=1 AND (p.privacy='public' OR pa.user_id=?) ORDER BY p.upload_date DESC''', (user['id'], user['id'])).fetchall()
+    else:
+        photos = db.execute('SELECT * FROM photos WHERE is_active=1 AND privacy="public" ORDER BY upload_date DESC').fetchall()
+    
+    photo_list = []
+    for p in photos:
+        pd = dict(p)
+        comments = db.execute('''SELECT c.content, c.created_at, u.nickname as nick, u.pfp_filename as pfp, u.role 
+            FROM comments c JOIN users u ON c.user_id=u.id 
+            WHERE c.photo_id=? ORDER BY c.created_at DESC LIMIT 3''', (p['id'],)).fetchall()
+        pd['comments'] = [dict(c, is_admin=dict(c)['role']=='admin') for c in comments]
+        pd['comment_count'] = db.execute('SELECT COUNT(*) FROM comments WHERE photo_id=?', (p['id'],)).fetchone()[0]
+        photo_list.append(pd)
+    
+    cutoff = (datetime.now() - timedelta(minutes=5)).isoformat()
+    online = db.execute('''SELECT nickname as nick, pfp_filename as pfp, role FROM users 
+        WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 20''', (cutoff,)).fetchall()
+    
+    db.close()
+    return render_template_string(MAIN_TMPL, user=user, photos=photo_list, 
+                                  online_users=[dict(o) for o in online], 
+                                  online_count=len(online))
 
-@app.route('/set-nickname', methods=['POST'])
-@require_user
-def set_nickname():
-    nickname = request.form.get('nickname', '').strip()
-    if not re.match(r'^[a-zA-Z0-9_]{3,20}$', nickname):
-        return jsonify({'error': 'Nickname must be 3-20 chars, letters/numbers/underscores'}), 400
-    ip = get_user_ip()
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.execute('INSERT INTO users (nickname, ip_address) VALUES (?, ?)', (nickname, ip))
-        conn.commit()
-        session['nickname'] = nickname
-        session['ip'] = ip
-    except sqlite3.IntegrityError:
+@app.route('/api/online')
+def api_online():
+    db = db_conn()
+    cutoff = (datetime.now() - timedelta(minutes=5)).isoformat()
+    online = db.execute('''SELECT nickname as nick, pfp_filename as pfp, role FROM users 
+        WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 20''', (cutoff,)).fetchall()
+    db.close()
+    html = ''.join([f'<div class="online-user"><img src="/pfp/{o["pfp"]}" class="online-avatar"><span class="online-name">{o["nick"]}</span>{f"<span class=\"online-role\">ADMIN</span>" if o["role"]=="admin" else ""}</div>' for o in online])
+    return html
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        nick = request.form['nickname'].strip()
+        pwd, conf = request.form['password'], request.form['confirm']
+        if not re.match(r'^[a-zA-Z0-9_]{3,20}$', nick):
+            return render_template_string(REGISTER_TMPL, error="Nickname: 3-20 chars, alphanumeric only"), 400
+        if len(pwd) < 6:
+            return render_template_string(REGISTER_TMPL, error="Password must be at least 6 characters"), 400
+        if pwd != conf:
+            return render_template_string(REGISTER_TMPL, error="Passwords do not match"), 400
+        pfp = request.files.get('pfp')
+        pfp_fn = 'default.png'
+        if pfp and allowed_pfp(pfp.filename):
+            pfp_fn = secure_filename(f"{secrets.token_hex(4)}_{pfp.filename}")
+            pfp.save(os.path.join(app.config['PFP_FOLDER'], pfp_fn))
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute('INSERT INTO users (nickname, password_hash, ip_address, pfp_filename) VALUES (?, ?, ?, ?)', 
+                        (nick, hash_pwd(pwd), get_ip(), pfp_fn))
+            conn.commit()
+            conn.close()
+            return redirect(url_for('login'))
+        except:
+            return render_template_string(REGISTER_TMPL, error="Nickname already taken"), 400
+    return render_template_string(REGISTER_TMPL)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        nick, pwd = request.form['nickname'].strip(), request.form['password']
+        ip = get_ip()
+        
+        # ✅ Brute-force: Check IP rate limit
+        if check_rate_limit(ip):
+            return render_template_string(LOGIN_TMPL, error="Too many attempts. Please wait."), 429
+        
+        # ✅ Brute-force: Check account lockout
+        locked, mins = check_account_lockout(nick)
+        if locked:
+            return render_template_string(LOGIN_TMPL, error=f"Account locked. Try again in {mins} minutes."), 403
+        
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        u = conn.execute('SELECT * FROM users WHERE nickname = ?', (nick,)).fetchone()
         conn.close()
-        return jsonify({'error': 'Nickname already taken'}), 409
-    conn.close()
-    return redirect(url_for('index'))
+        
+        if not u or dict(u)['password_hash'] != hash_pwd(pwd):
+            # Record failed attempt
+            record_login_attempt(ip, nick)
+            increment_failed_login(nick)
+            return render_template_string(LOGIN_TMPL, error="Invalid credentials."), 401
+        
+        user = dict(u)
+        if is_banned(user):
+            return render_template_string(LOGIN_TMPL, error="Account is restricted."), 403
+        
+        # ✅ Reset failed attempts on success
+        reset_login_attempts(nick)
+        session['user_id'] = user['id']
+        session['role'] = user['role']
+        update_last_seen()
+        return redirect(request.args.get('next', url_for('index')))
+    return render_template_string(LOGIN_TMPL)
 
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect(url_for('index'))
 
-@app.route('/api/view/<int:photo_id>', methods=['POST'])
-@require_user
-def track_view(photo_id):
-    nickname = session.get('nickname')
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('UPDATE photos SET views = views + 1 WHERE id = ?', (photo_id,))
-    if nickname:
-        conn.execute('''INSERT INTO user_states (photo_id, user_nickname, viewed, last_viewed) 
-                       VALUES (?, ?, 1, ?) 
-                       ON CONFLICT(photo_id, user_nickname) DO UPDATE SET viewed=1, last_viewed=?''',
-                    (photo_id, nickname, datetime.now().isoformat(), datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True})
+@app.route('/profile', methods=['GET', 'POST'])
+@require_login
+def profile():
+    user = get_user()
+    if request.method == 'POST':
+        pfp = request.files.get('pfp')
+        if pfp and allowed_pfp(pfp.filename):
+            if user['pfp_filename'] != 'default.png':
+                try: os.remove(os.path.join(app.config['PFP_FOLDER'], user['pfp_filename']))
+                except: pass
+            pfp_fn = secure_filename(f"{secrets.token_hex(4)}_{pfp.filename}")
+            pfp.save(os.path.join(app.config['PFP_FOLDER'], pfp_fn))
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute('UPDATE users SET pfp_filename = ? WHERE id = ?', (pfp_fn, user['id']))
+            conn.commit()
+            conn.close()
+            return redirect(url_for('profile'))
+    return render_template_string(PROFILE_TMPL, user=user)
 
-@app.route('/api/download/<int:photo_id>', methods=['POST'])
-@require_user
-def track_download(photo_id):
-    nickname = session.get('nickname')
+@app.route('/pfp/<filename>')
+def serve_pfp(filename):
+    return send_file(os.path.join(app.config['PFP_FOLDER'], secure_filename(filename)))
+
+@app.route('/upload', methods=['POST'])
+@check_access
+@require_admin
+def upload():
+    f = request.files.get('file')
+    if not f or not allowed_file(f.filename):
+        return redirect(url_for('index'))
+    fn = secure_filename(f"{secrets.token_hex(8)}_{f.filename}")
+    f.save(os.path.join(app.config['UPLOAD_FOLDER'], fn))
+    title = request.form.get('title', '').strip()[:100]
+    desc = request.form.get('desc', '').strip()[:300]
+    privacy = request.form.get('privacy', 'public')
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('UPDATE photos SET downloads = downloads + 1 WHERE id = ?', (photo_id,))
-    if nickname:
-        conn.execute('''INSERT INTO user_states (photo_id, user_nickname, downloaded) 
-                       VALUES (?, ?, 1) 
-                       ON CONFLICT(photo_id, user_nickname) DO UPDATE SET downloaded=1''',
-                    (photo_id, nickname))
+    conn.execute('INSERT INTO photos (filename, original_name, title, description, privacy, uploader_id) VALUES (?, ?, ?, ?, ?, ?)', 
+                (fn, f.filename, title or f.filename, desc, privacy, session['user_id']))
+    pid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+    if privacy == 'private':
+        allowed = request.form.get('allowed_users', '')
+        for nick in [n.strip() for n in allowed.split(',') if n.strip()]:
+            u = conn.execute('SELECT id FROM users WHERE nickname = ?', (nick,)).fetchone()
+            if u:
+                conn.execute('INSERT OR IGNORE INTO photo_access (photo_id, user_id) VALUES (?, ?)', (pid, u[0]))
     conn.commit()
     conn.close()
-    return jsonify({'success': True})
+    return redirect(url_for('index'))
 
 @app.route('/uploads/<filename>')
-@require_user
-def uploaded_file(filename):
+@check_access
+def serve_upload(filename):
+    user = get_user()
+    conn = sqlite3.connect(DB_PATH)
+    photo = conn.execute('SELECT privacy FROM photos WHERE filename = ?', (filename,)).fetchone()
+    if photo and photo[0] == 'private':
+        if not user:
+            conn.close()
+            return redirect(url_for('login'))
+        has_access = conn.execute('SELECT 1 FROM photo_access pa JOIN photos p ON pa.photo_id=p.id WHERE p.filename=? AND (pa.user_id=? OR p.uploader_id=?)', 
+                                 (filename, user['id'], user['id'])).fetchone()
+        if not has_access:
+            conn.close()
+            return jsonify({'error': 'Access denied'}), 403
+    conn.close()
     return send_file(os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(filename)))
 
-@app.route('/api/like/<int:photo_id>', methods=['POST'])
-@require_user
-def like_photo(photo_id):
-    nickname = session.get('nickname')
-    if not nickname:
-        return jsonify({'error': 'Set a nickname first'}), 401
+@app.route('/api/like/<int:pid>', methods=['POST'])
+@require_login
+def api_like(pid):
+    uid = session['user_id']
     conn = sqlite3.connect(DB_PATH)
     try:
-        conn.execute('INSERT INTO user_likes (photo_id, user_nickname) VALUES (?, ?)', (photo_id, nickname))
-        conn.execute('UPDATE photos SET likes = likes + 1 WHERE id = ?', (photo_id,))
+        conn.execute('INSERT INTO user_likes (photo_id, user_id) VALUES (?, ?)', (pid, uid))
+        conn.execute('UPDATE photos SET likes = likes + 1 WHERE id = ?', (pid,))
         conn.commit()
-        likes = conn.execute('SELECT likes FROM photos WHERE id = ?', (photo_id,)).fetchone()[0]
-        conn.close()
-        return jsonify({'success': True, 'likes': likes})
-    except sqlite3.IntegrityError:
-        conn.close()
+        likes = conn.execute('SELECT likes FROM photos WHERE id = ?', (pid,)).fetchone()[0]
+        return jsonify({'ok': True, 'likes': likes})
+    except:
         return jsonify({'error': 'Already liked'}), 400
+    finally: conn.close()
 
-@app.route('/comment/<int:photo_id>', methods=['POST'])
-@require_user
-def add_comment(photo_id):
-    nickname = session.get('nickname')
-    if not nickname:
-        return jsonify({'error': 'Set a nickname first'}), 401
+@app.route('/api/view/<int:pid>', methods=['POST'])
+def api_view(pid):
+    uid = session.get('user_id')
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE photos SET views = views + 1 WHERE id = ?', (pid,))
+    if uid:
+        conn.execute('''INSERT INTO user_states (photo_id, user_id, viewed, last_viewed) VALUES (?, ?, 1, ?) 
+                       ON CONFLICT(photo_id, user_id) DO UPDATE SET viewed=1, last_viewed=?''', 
+                     (pid, uid, datetime.now().isoformat(), datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/download/<int:pid>', methods=['POST'])
+@require_login
+def api_download(pid):
+    uid = session['user_id']
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE photos SET downloads = downloads + 1 WHERE id = ?', (pid,))
+    conn.execute('''INSERT INTO user_states (photo_id, user_id, downloaded) VALUES (?, ?, 1) 
+                   ON CONFLICT(photo_id, user_id) DO UPDATE SET downloaded=1''', (pid, uid))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/comment/<int:pid>', methods=['POST'])
+@require_login
+def add_comment(pid):
+    user = get_user()
+    if is_comment_banned(user):
+        return redirect(url_for('index'))
     content = request.form.get('content', '').strip()
-    if len(content) < 2 or len(content) > 500:
-        return jsonify({'error': 'Comment must be 2-500 characters'}), 400
+    if len(content) < 2:
+        return redirect(url_for('index'))
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('INSERT INTO comments (photo_id, user_nickname, content) VALUES (?, ?, ?)',
-                 (photo_id, nickname, content))
+    conn.execute('INSERT INTO comments (photo_id, user_id, content) VALUES (?, ?, ?)', (pid, user['id'], content))
     conn.commit()
     conn.close()
     return redirect(url_for('index'))
 
-# ============== ADMIN ROUTES ==============
-@app.route('/adminui')
-def admin_login_page():
-    if session.get('admin_logged_in'):
-        return redirect(url_for('admin_panel'))
-    return render_template_string(LOGIN_TEMPLATE)
-
-@app.route('/adminui/login', methods=['POST'])
-def admin_login():
-    username = request.form.get('username')
-    password = request.form.get('password')
-    if username == app.config['ADMIN_USERNAME'] and hash_password(password) == app.config['ADMIN_PASSWORD_HASH']:
-        session['admin_logged_in'] = True
-        session['admin_user'] = username
-        return redirect(url_for('admin_panel'))
-    return render_template_string(LOGIN_TEMPLATE), 401
-
-@app.route('/adminui/panel')
-@require_admin
-def admin_panel():
-    conn = get_db()
-    photos = conn.execute('SELECT * FROM photos ORDER BY upload_date DESC').fetchall()
-    users = conn.execute('SELECT * FROM users ORDER BY created_at DESC').fetchall()
-    ip_bans = conn.execute('SELECT * FROM ip_bans ORDER BY created_at DESC').fetchall()
-    site_offline = is_site_offline()
-    conn.close()
-    return render_template_string(ADMIN_TEMPLATE, photos=photos, users=users, ip_bans=ip_bans, site_offline=site_offline)
-
-@app.route('/adminui/upload', methods=['POST'])
-@require_admin
-def admin_upload():
-    if 'file' not in request.files:
-        return redirect(url_for('admin_panel'))
-    file = request.files['file']
-    if file.filename == '' or not allowed_file(file.filename):
-        return jsonify({'error': 'Only PNG files allowed'}), 400
-    filename = secure_filename(f"{secrets.token_hex(8)}_{file.filename}")
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file.save(filepath)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('INSERT INTO photos (filename, original_name, uploaded_by) VALUES (?, ?, ?)',
-                 (filename, file.filename, session.get('admin_user', 'Admin')))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('admin_panel'))
-
-@app.route('/adminui/photo/delete/<int:photo_id>', methods=['POST'])
-@require_admin
-def delete_photo(photo_id):
-    conn = sqlite3.connect(DB_PATH)
-    photo = conn.execute('SELECT filename FROM photos WHERE id = ?', (photo_id,)).fetchone()
-    if photo:
-        try:
-            os.remove(os.path.join(app.config['UPLOAD_FOLDER'], photo['filename']))
-        except:
-            pass
-        conn.execute('DELETE FROM photos WHERE id = ?', (photo_id,))
-        conn.execute('DELETE FROM comments WHERE photo_id = ?', (photo_id,))
-        conn.execute('DELETE FROM user_likes WHERE photo_id = ?', (photo_id,))
-        conn.execute('DELETE FROM user_states WHERE photo_id = ?', (photo_id,))
+@app.route('/support', methods=['GET', 'POST'])
+@check_access
+def support():
+    if request.method == 'POST':
+        user = get_user()
+        uid = user['id'] if user else 0
+        guest_nick = request.form.get('guest_nick', '').strip() if not user else None
+        guest_email = request.form.get('email', '').strip() if not user else None
+        subject, msg = request.form['subject'], request.form['message']
+        if not msg.strip():
+            return render_template_string(SUPPORT_TMPL, error="Message required."), 400
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('''INSERT INTO support_tickets (user_id, guest_nick, guest_email, subject, message) 
+                       VALUES (?, ?, ?, ?, ?)''', (uid, guest_nick, guest_email, subject, msg))
         conn.commit()
-    conn.close()
-    return redirect(url_for('admin_panel'))
+        conn.close()
+        return render_template_string(SUPPORT_TMPL, success=True)
+    return render_template_string(SUPPORT_TMPL)
 
-@app.route('/adminui/comment/delete/<int:comment_id>', methods=['POST'])
+@app.route('/admin')
+@check_access
 @require_admin
-def delete_comment(comment_id):
+def admin():
+    db = db_conn()
+    photos = db.execute('SELECT id, filename, original_name, title, privacy, views, downloads, likes FROM photos ORDER BY upload_date DESC').fetchall()
+    users = db.execute('SELECT id, nickname, role, status, pfp_filename, comment_banned_until FROM users WHERE status="active" ORDER BY created_at DESC').fetchall()
+    # ✅ NEW: Get banned users for management panel
+    banned = db.execute('''SELECT id, nickname, ban_until, 
+                          (SELECT reason FROM ip_bans WHERE ip_address = users.ip_address LIMIT 1) as ban_reason
+                          FROM users WHERE status="banned" ORDER BY ban_until DESC''').fetchall()
+    tickets = db.execute('''SELECT t.id, t.subject, t.status, t.admin_reply, t.message, t.guest_nick, t.guest_email, u.nickname as nick 
+                           FROM support_tickets t LEFT JOIN users u ON t.user_id=u.id ORDER BY t.created_at DESC''').fetchall()
+    offline = is_site_offline()
+    maint_msg = db.execute('SELECT value FROM settings WHERE key="maintenance_msg"').fetchone()[0]
+    db.close()
+    return render_template_string(ADMIN_TMPL, photos=[dict(p) for p in photos], 
+                                  users=[dict(u) for u in users],
+                                  banned_users=[dict(b) for b in banned],  # ✅ Pass banned users to template
+                                  tickets=[dict(t) for t in tickets], 
+                                  offline=offline, maint_msg=maint_msg)
+
+@app.route('/admin/photo/<int:pid>/delete', methods=['POST'])
+@require_admin
+def admin_del_photo(pid):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('DELETE FROM comments WHERE id = ?', (comment_id,))
+    try: 
+        fn = conn.execute('SELECT filename FROM photos WHERE id=?', (pid,)).fetchone()[0]
+        os.remove(os.path.join(app.config['UPLOAD_FOLDER'], fn))
+    except: pass
+    for t in ['comments','user_likes','user_states','photo_access']: 
+        conn.execute(f'DELETE FROM {t} WHERE photo_id=?', (pid,))
+    conn.execute('DELETE FROM photos WHERE id=?', (pid,))
     conn.commit()
     conn.close()
-    return redirect(url_for('index'))
+    return redirect(url_for('admin'))
 
-@app.route('/adminui/user/ban/<nickname>', methods=['POST'])
+@app.route('/admin/user/<int:uid>/ban', methods=['POST'])
 @require_admin
-def ban_user(nickname):
+def admin_ban(uid):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('UPDATE users SET is_banned = 1 WHERE nickname = ?', (nickname,))
+    conn.execute('UPDATE users SET status="banned", ban_until=NULL WHERE id=?', (uid,))
     conn.commit()
     conn.close()
-    return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin'))
 
-@app.route('/adminui/user/timeout/<nickname>', methods=['POST'])
+@app.route('/admin/user/<int:uid>/unban', methods=['POST'])  # ✅ NEW: Unban endpoint
 @require_admin
-def timeout_user(nickname):
+def admin_unban(uid):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE users SET status="active", ban_until=NULL WHERE id=?', (uid,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin'))
+
+@app.route('/admin/user/<int:uid>/timeout', methods=['POST'])
+@require_admin
+def admin_timeout(uid):
     until = (datetime.now() + timedelta(hours=24)).isoformat()
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('UPDATE users SET is_banned = 1, ban_until = ? WHERE nickname = ?', (until, nickname))
+    conn.execute('UPDATE users SET status="banned", ban_until=? WHERE id=?', (until, uid))
     conn.commit()
     conn.close()
-    return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin'))
 
-@app.route('/adminui/user/ipban/<ip_address>', methods=['POST'])
+@app.route('/admin/user/<int:uid>/comment-ban', methods=['POST'])
 @require_admin
-def ban_ip(ip_address):
+def admin_comment_ban(uid):
+    until = (datetime.now() + timedelta(days=7)).isoformat()
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('INSERT OR REPLACE INTO ip_bans (ip_address, reason) VALUES (?, ?)', 
-                 (ip_address, 'Admin ban'))
+    conn.execute('UPDATE users SET comment_banned_until=? WHERE id=?', (until, uid))
     conn.commit()
     conn.close()
-    return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin'))
 
-@app.route('/adminui/ban/remove/<int:ban_id>', methods=['POST'])
+@app.route('/admin/user/<int:uid>/promote', methods=['POST'])
 @require_admin
-def remove_ban(ban_id):
+def admin_promote(uid):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('DELETE FROM ip_bans WHERE id = ?', (ban_id,))
+    conn.execute('UPDATE users SET role="admin" WHERE id=?', (uid,))
     conn.commit()
     conn.close()
-    return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin'))
 
-@app.route('/adminui/toggle-offline', methods=['POST'])
+@app.route('/admin/ticket/<int:tid>/reply', methods=['POST'])
 @require_admin
-def toggle_offline():
+def admin_reply(tid):
+    reply = request.form['reply']
     conn = sqlite3.connect(DB_PATH)
-    current = is_site_offline()
-    conn.execute('UPDATE settings SET value = ? WHERE key = "site_offline"', 
-                 ('1' if not current else '0'))
+    conn.execute('UPDATE support_tickets SET admin_reply=?, status="resolved" WHERE id=?', (reply, tid))
     conn.commit()
     conn.close()
-    return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin'))
 
-@app.route('/adminui/logout')
-def admin_logout():
-    session.pop('admin_logged_in', None)
-    session.pop('admin_user', None)
-    return redirect(url_for('index'))
+@app.route('/admin/toggle-offline', methods=['POST'])
+@require_admin
+def admin_toggle():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE settings SET value = ? WHERE key="site_offline"', ('1' if not is_site_offline() else '0'))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin'))
 
-# ============== ERROR HANDLERS ==============
+@app.route('/admin/set-maintenance', methods=['POST'])
+@require_admin
+def admin_set_maint():
+    msg = request.form.get('msg', 'Site under maintenance')[:200]
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE settings SET value = ? WHERE key="maintenance_msg"', (msg,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin'))
+
+@app.errorhandler(400)
+def bad_request(e): return jsonify({'error': 'Bad request'}), 400
 @app.errorhandler(404)
-def not_found(e):
-    return jsonify({'error': 'Not found'}), 404
-
+def not_found(e): return jsonify({'error': 'Not found'}), 404
 @app.errorhandler(413)
-def too_large(e):
-    return jsonify({'error': 'File too large (max 16MB)'}), 413
-
+def too_large(e): return jsonify({'error': 'File too large (max 32MB)'}), 413
+@app.errorhandler(429)
+def rate_limit(e): return jsonify({'error': 'Too many requests'}), 429
 @app.errorhandler(500)
-def server_error(e):
-    return jsonify({'error': 'Server error'}), 500
+def server_error(e): return jsonify({'error': 'Server error'}), 500
 
-# ============== DEPLOYMENT ==============
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
