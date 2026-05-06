@@ -7,13 +7,9 @@ services:
     envVars:
       - key: SECRET_KEY
         generateValue: true
-      - key: ADMIN_PASSWORD
-        # 🔐 CHANGE THIS to your secure password hash!
-        # Generate with: python -c "import hashlib; print(hashlib.sha256('YourPassword123!'.encode()).hexdigest())"
-        value: "your_precomputed_hash_here"
-      - key: DATABASE_URL
-        value: "sqlite:///photoboth.db"
+      - key: RENDER
+        value: "true"
     disk:
       name: photoboth-data
       mountPath: /opt/render/project/src
-      sizeGB: 1
+      sizeGB: 2
