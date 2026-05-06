@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-PhotoBoth v3.2 - Modern Photo Platform
-✅ Render.com Compatible: Persistent Disk Support
-✅ All Templates Included - No Abbreviations
-✅ Fixed: f-string syntax, file persistence, mobile UI
-Single File - Deploy on Render.com
+PhotoBoth v4.0 - Professional Photo Platform
+✅ Modern UI, Admin Controls, Persistent Storage
+✅ Render.com Compatible - Single File Deployment
 """
 
 import os, sqlite3, hashlib, secrets, re, time, base64
@@ -18,7 +16,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 
-# ✅ Detect Render environment
+# ✅ Detect Render environment for persistent paths
 IS_RENDER = os.environ.get('RENDER', '').lower() == 'true'
 BASE_PATH = '/opt/render/project/src' if IS_RENDER else os.getcwd()
 
@@ -143,6 +141,7 @@ def init_db():
     for key, val in [("site_offline", "0"), ("maintenance_msg", "Site under maintenance"), ("theme_default", "light")]:
         c.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (key, val))
     
+    # Migrations
     migrations = [
         'ALTER TABLE photos ADD COLUMN title TEXT',
         'ALTER TABLE photos ADD COLUMN description TEXT',
@@ -158,10 +157,12 @@ def init_db():
         try: c.execute(sql)
         except: pass
     
+    # Default accounts
     for nick, pwd, role in [('admin', 'PhotoBoth2026!', 'admin'), ('user', 'User123!', 'user')]:
         c.execute('INSERT OR IGNORE INTO users (nickname, password_hash, role) VALUES (?, ?, ?)',
                   (nick, hashlib.sha256(pwd.encode()).hexdigest(), role))
     
+    # Default PFP with robust fallback
     default_pfp_path = os.path.join(app.config['PFP_FOLDER'], 'default.png')
     if not os.path.exists(default_pfp_path):
         try:
@@ -170,8 +171,9 @@ def init_db():
             draw = ImageDraw.Draw(img)
             draw.ellipse([16, 16, 112, 112], fill=(124, 58, 237))
             img.save(default_pfp_path)
-        except:
-            minimal_png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==')
+        except Exception:
+            # Fallback: minimal valid PNG (base64 encoded)
+            minimal_png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==')
             with open(default_pfp_path, 'wb') as f:
                 f.write(minimal_png)
     
@@ -322,99 +324,238 @@ def check_access(f):
         return f(*a, **kw)
     return dec
 
-# ============== CSS ==============
+# ============== PROFESSIONAL CSS ==============
 CSS = '''
 <style>
-:root { --bg: #ffffff; --bg-card: #ffffff; --bg-hover: #f8fafc; --border: #e2e8f0; --primary: #6366f1; --primary-glow: rgba(99, 102, 241, 0.2); --success: #22c55e; --danger: #ef4444; --warning: #f59e0b; --text: #0f172a; --text-dim: #64748b; --text-link: #4f46e5; --glass: none; --shadow: 0 4px 12px rgba(0,0,0,0.08); --radius: 12px; --transition: 0.2s ease; }
-[data-theme="dark"] { --bg: #0a0e17; --bg-card: rgba(30, 35, 50, 0.9); --bg-hover: rgba(45, 52, 72, 0.9); --border: rgba(100, 116, 139, 0.4); --primary: #818cf8; --primary-glow: rgba(124, 58, 237, 0.3); --success: #4ade80; --danger: #f87171; --warning: #fbbf24; --text: #f1f5f9; --text-dim: #94a3b8; --text-link: #a5b4fc; --shadow: 0 8px 24px rgba(0,0,0,0.4); }
+:root {
+  --bg: #f8fafc; --bg-card: #ffffff; --bg-hover: #f1f5f9;
+  --border: #e2e8f0; --primary: #3b82f6; --primary-dark: #2563eb;
+  --primary-glow: rgba(59, 130, 246, 0.15);
+  --success: #10b981; --danger: #ef4444; --warning: #f59e0b;
+  --text: #1e293b; --text-dim: #64748b; --text-link: #3b82f6;
+  --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+  --radius: 12px; --transition: 0.2s ease;
+}
+[data-theme="dark"] {
+  --bg: #0f172a; --bg-card: #1e293b; --bg-hover: #334155;
+  --border: #475569; --primary: #60a5fa; --primary-dark: #3b82f6;
+  --primary-glow: rgba(96, 165, 250, 0.2);
+  --success: #34d399; --danger: #f87171; --warning: #fbbf24;
+  --text: #f1f5f9; --text-dim: #94a3b8; --text-link: #93c5fd;
+  --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.4), 0 4px 6px -2px rgba(0,0,0,0.3);
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6; transition: background 0.3s, color 0.3s; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6;
+  transition: background 0.3s, color 0.3s;
+  -webkit-font-smoothing: antialiased;
+}
 @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.85} }
-.container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
-header { background: var(--bg-card); border-bottom: 1px solid var(--border); padding: 12px 0; position: sticky; top: 0; z-index: 100; box-shadow: var(--shadow); transition: background 0.3s, border-color 0.3s; }
-.nav { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-.logo { font-size: 20px; font-weight: 800; color: var(--primary); animation: pulse 3s infinite; }
-.nav-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.nav-links a { color: var(--text-dim); text-decoration: none; font-size: 14px; padding: 6px 12px; border-radius: 8px; transition: var(--transition); }
+.container { max-width: 1280px; margin: 0 auto; padding: 0 24px; }
+header {
+  background: var(--bg-card); border-bottom: 1px solid var(--border);
+  padding: 16px 0; position: sticky; top: 0; z-index: 100;
+  box-shadow: var(--shadow); transition: background 0.3s, border-color 0.3s;
+}
+.nav { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+.logo {
+  font-size: 22px; font-weight: 800; color: var(--primary);
+  display: flex; align-items: center; gap: 8px;
+}
+.logo-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 20px;
+  background: var(--primary); color: white; font-weight: 600;
+}
+.nav-links { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.nav-links a {
+  color: var(--text-dim); text-decoration: none; font-size: 14px; padding: 8px 14px;
+  border-radius: 8px; transition: var(--transition); font-weight: 500;
+}
 .nav-links a:hover { color: var(--text); background: var(--bg-hover); }
-.theme-toggle { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; cursor: pointer; color: var(--text-dim); font-size: 14px; transition: var(--transition); display: flex; align-items: center; gap: 4px; }
-.theme-toggle:hover { background: var(--bg-hover); color: var(--text); }
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); color: var(--text); cursor: pointer; font-size: 14px; font-weight: 500; transition: var(--transition); }
+.theme-toggle {
+  background: var(--bg-hover); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; cursor: pointer; color: var(--text-dim); font-size: 14px;
+  transition: var(--transition); display: flex; align-items: center; gap: 6px;
+}
+.theme-toggle:hover { background: var(--primary); color: white; border-color: var(--primary); }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 18px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-card); color: var(--text); cursor: pointer; font-size: 14px; font-weight: 500;
+  transition: var(--transition); text-decoration: none;
+}
 .btn:hover { background: var(--bg-hover); transform: translateY(-1px); }
 .btn:active { transform: scale(0.99); }
-.btn-primary { background: var(--primary); border-color: var(--primary); color: white; box-shadow: 0 2px 8px var(--primary-glow); }
-.btn-primary:hover { box-shadow: 0 4px 12px var(--primary-glow); }
+.btn-primary {
+  background: var(--primary); border-color: var(--primary); color: white;
+  box-shadow: 0 2px 4px var(--primary-glow);
+}
+.btn-primary:hover { background: var(--primary-dark); box-shadow: 0 4px 8px var(--primary-glow); }
 .btn-danger { background: var(--danger); border-color: var(--danger); color: white; }
 .btn-success { background: var(--success); border-color: var(--success); color: white; }
 .btn-warning { background: var(--warning); border-color: var(--warning); color: white; }
-.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 20px; box-shadow: var(--shadow); animation: fadeIn 0.3s ease; transition: background 0.3s, border-color 0.3s; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; margin: 24px 0; }
-.photo-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; transition: var(--transition); position: relative; }
-.photo-card:hover { border-color: var(--primary); transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
-[data-theme="dark"] .photo-card:hover { box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
-.photo-badge { position: absolute; top: 12px; right: 12px; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
-.badge-private { background: rgba(245,158,11,0.15); color: var(--warning); }
-.photo-img { width: 100%; height: 180px; object-fit: cover; background: linear-gradient(135deg, #e2e8f0, #cbd5e1); }
-[data-theme="dark"] .photo-img { background: linear-gradient(135deg, #1e293b, #334155); }
-.photo-meta { padding: 16px; }
-.photo-title { font-weight: 700; margin-bottom: 6px; font-size: 15px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.photo-desc { color: var(--text-dim); font-size: 13px; margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.stats { display: flex; gap: 12px; color: var(--text-dim); font-size: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.btn-sm { padding: 6px 12px; font-size: 13px; }
+.btn-icon { padding: 8px; border-radius: 8px; }
+.card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 24px; margin-bottom: 24px; box-shadow: var(--shadow);
+  animation: fadeIn 0.3s ease; transition: background 0.3s, border-color 0.3s, box-shadow 0.3s;
+}
+.card:hover { box-shadow: var(--shadow-lg); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 24px; margin: 24px 0; }
+.photo-card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; transition: var(--transition); position: relative;
+}
+.photo-card:hover { border-color: var(--primary); transform: translateY(-4px); box-shadow: var(--shadow-lg); }
+.photo-badge {
+  position: absolute; top: 16px; right: 16px; padding: 4px 12px; border-radius: 20px;
+  font-size: 11px; font-weight: 600; background: var(--bg-card); border: 1px solid var(--border);
+}
+.badge-private { background: rgba(245,158,11,0.1); color: var(--warning); border-color: var(--warning); }
+.photo-img { width: 100%; height: 200px; object-fit: cover; background: linear-gradient(135deg, #e2e8f0, #cbd5e1); }
+[data-theme="dark"] .photo-img { background: linear-gradient(135deg, #334155, #475569); }
+.photo-meta { padding: 20px; }
+.photo-title { font-weight: 700; margin-bottom: 8px; font-size: 16px; color: var(--text); }
+.photo-desc { color: var(--text-dim); font-size: 14px; margin-bottom: 16px; line-height: 1.5; }
+.stats { display: flex; gap: 16px; color: var(--text-dim); font-size: 13px; margin-bottom: 16px; flex-wrap: wrap; }
 .stats span { display: flex; align-items: center; gap: 4px; }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.actions .btn { flex: 1; min-width: 65px; padding: 6px 10px; font-size: 13px; }
-.input-group { margin-bottom: 14px; }
-.input-group label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
-.input-group input, .input-group textarea, .input-group select { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; transition: var(--transition); }
-.input-group input:focus, .input-group textarea:focus, .input-group select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
-.modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 200; align-items: center; justify-content: center; padding: 20px; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.actions .btn { flex: 1; min-width: 70px; }
+.input-group { margin-bottom: 18px; }
+.input-group label { display: block; font-size: 14px; color: var(--text-dim); margin-bottom: 8px; font-weight: 500; }
+.input-group input, .input-group textarea, .input-group select {
+  width: 100%; padding: 12px 14px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 10px; color: var(--text);
+  font-size: 14px; transition: var(--transition);
+}
+.input-group input:focus, .input-group textarea:focus, .input-group select:focus {
+  outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.modal {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.5); z-index: 200; align-items: center; justify-content: center;
+  padding: 24px;
+}
 .modal.active { display: flex; animation: fadeIn 0.2s ease; }
-.modal-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); width: 100%; max-width: 460px; max-height: 90vh; overflow: auto; padding: 24px; box-shadow: var(--shadow); animation: fadeIn 0.2s ease; }
-.modal-header { font-size: 18px; font-weight: 700; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
-.error-msg { color: var(--danger); font-size: 13px; margin-top: 6px; display: block; }
-.success-msg { color: var(--success); font-size: 13px; margin-top: 6px; display: block; }
-.comments-section { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 16px; }
-.comment { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px dashed var(--border); animation: fadeIn 0.2s ease; }
+.modal-box {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  width: 100%; max-width: 480px; max-height: 90vh; overflow: auto; padding: 28px;
+  box-shadow: var(--shadow-lg); animation: fadeIn 0.2s ease;
+}
+.modal-header { font-size: 20px; font-weight: 700; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+.error-msg { color: var(--danger); font-size: 13px; margin-top: 8px; display: block; }
+.success-msg { color: var(--success); font-size: 13px; margin-top: 8px; display: block; }
+.comments-section { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 20px; }
+.comment {
+  display: flex; gap: 14px; padding: 14px 0; border-bottom: 1px dashed var(--border);
+  animation: fadeIn 0.2s ease;
+}
 .comment:last-child { border-bottom: none; }
-.comment-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; border: 2px solid var(--border); flex-shrink: 0; }
+.comment-avatar {
+  width: 40px; height: 40px; border-radius: 50%; object-fit: cover;
+  border: 2px solid var(--border); flex-shrink: 0;
+}
 .comment-body { flex: 1; min-width: 0; }
-.comment-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.comment-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .comment-author { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 6px; }
-.verified-badge { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--primary); color: white; font-size: 10px; font-weight: 700; }
-.comment-time { color: var(--text-dim); font-size: 11px; }
-.comment-text { font-size: 14px; line-height: 1.5; word-wrap: break-word; }
-.load-more { color: var(--text-link); font-size: 13px; cursor: pointer; margin-top: 8px; background: none; border: none; padding: 6px 0; transition: var(--transition); }
+.verified-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--primary); color: white; font-size: 11px; font-weight: 700;
+}
+.comment-time { color: var(--text-dim); font-size: 12px; }
+.comment-text { font-size: 14px; line-height: 1.5; word-wrap: break-word; color: var(--text); }
+.load-more {
+  color: var(--text-link); font-size: 13px; cursor: pointer; margin-top: 10px;
+  background: none; border: none; padding: 6px 0; transition: var(--transition); font-weight: 500;
+}
 .load-more:hover { color: var(--primary); }
-.sidebar { position: fixed; right: 0; top: 64px; width: 260px; height: calc(100vh - 64px); background: var(--bg-card); border-left: 1px solid var(--border); padding: 20px; overflow-y: auto; box-shadow: -4px 0 16px rgba(0,0,0,0.06); z-index: 90; transition: background 0.3s, border-color 0.3s; }
+.sidebar {
+  position: fixed; right: 0; top: 72px; width: 280px; height: calc(100vh - 72px);
+  background: var(--bg-card); border-left: 1px solid var(--border); padding: 24px; overflow-y: auto;
+  box-shadow: -4px 0 16px rgba(0,0,0,0.08); z-index: 90; transition: background 0.3s, border-color 0.3s;
+}
 [data-theme="dark"] .sidebar { box-shadow: -4px 0 16px rgba(0,0,0,0.3); }
-.sidebar-title { font-size: 14px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
-.online-list { display: flex; flex-direction: column; gap: 8px; }
-.online-user { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; transition: var(--transition); cursor: pointer; }
+.sidebar-title { font-size: 15px; font-weight: 700; margin-bottom: 18px; display: flex; align-items: center; gap: 10px; }
+.online-list { display: flex; flex-direction: column; gap: 10px; }
+.online-user {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+  border-radius: 10px; transition: var(--transition); cursor: pointer;
+}
 .online-user:hover { background: var(--bg-hover); }
-.online-avatar { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; border: 2px solid var(--success); position: relative; }
-.online-avatar::after { content: ''; position: absolute; bottom: 2px; right: 2px; width: 9px; height: 9px; border-radius: 50%; background: var(--success); border: 2px solid var(--bg-card); }
-.online-name { font-size: 13px; font-weight: 500; flex: 1; }
-.online-role { font-size: 10px; padding: 2px 7px; border-radius: 8px; background: var(--primary); color: white; }
-.table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.table th, .table td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
-.table th { color: var(--text-dim); font-weight: 600; }
-.badge { display: inline-block; padding: 3px 9px; border-radius: 16px; font-size: 11px; font-weight: 600; }
-.badge-open { background: rgba(99,102,241,0.12); color: var(--primary); }
-.badge-resolved { background: rgba(34,197,94,0.12); color: var(--success); }
+.online-avatar {
+  width: 34px; height: 34px; border-radius: 50%; object-fit: cover;
+  border: 2px solid var(--success); position: relative;
+}
+.online-avatar::after {
+  content: ''; position: absolute; bottom: 2px; right: 2px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--success); border: 2px solid var(--bg-card);
+}
+.online-name { font-size: 14px; font-weight: 500; flex: 1; }
+.online-role { font-size: 10px; padding: 3px 10px; border-radius: 12px; background: var(--primary); color: white; font-weight: 600; }
+.table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table th, .table td { padding: 14px 16px; text-align: left; border-bottom: 1px solid var(--border); }
+.table th { color: var(--text-dim); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; }
+.table tr:hover { background: var(--bg-hover); }
+.badge { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.badge-open { background: rgba(59,130,246,0.1); color: var(--primary); }
+.badge-resolved { background: rgba(16,185,129,0.1); color: var(--success); }
 .badge-admin { background: var(--primary); color: white; }
-.badge-banned { background: rgba(239,68,68,0.12); color: var(--danger); }
-.admin-panel { display: grid; grid-template-columns: 220px 1fr; gap: 24px; margin-top: 24px; }
-.admin-nav a { display: block; padding: 10px 14px; color: var(--text-dim); border-radius: 8px; margin-bottom: 4px; transition: var(--transition); font-weight: 500; }
+.badge-banned { background: rgba(239,68,68,0.1); color: var(--danger); }
+.admin-panel { display: grid; grid-template-columns: 240px 1fr; gap: 28px; margin-top: 28px; }
+.admin-nav a {
+  display: block; padding: 12px 16px; color: var(--text-dim); border-radius: 10px;
+  margin-bottom: 6px; transition: var(--transition); font-weight: 500;
+}
 .admin-nav a:hover, .admin-nav a.active { background: var(--bg-hover); color: var(--text); }
-.offline-msg { text-align: center; padding: 80px 20px; font-size: 17px; color: var(--text-dim); }
-.pfp-upload { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
-.pfp-preview { width: 60px; height: 60px; border-radius: 50%; object-fit: cover; border: 3px solid var(--primary); }
-.main-content { margin-right: 280px; }
-.ticket-message { background: var(--bg-hover); padding: 12px; border-radius: 8px; margin: 8px 0; font-size: 13px; white-space: pre-wrap; max-height: 140px; overflow-y: auto; }
-.admin-reply { background: rgba(99,102,241,0.08); padding: 12px; border-radius: 8px; margin: 8px 0; font-size: 13px; border-left: 3px solid var(--primary); }
-@media (max-width: 1024px) { .sidebar { display: none; } .main-content { margin-right: 0; } .grid { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 768px) { .container { padding: 0 16px; } .nav { flex-wrap: wrap; } .nav-links { width: 100%; justify-content: center; margin-top: 10px; } .grid { grid-template-columns: 1fr; } .photo-img { height: 200px; } .admin-panel { grid-template-columns: 1fr; } .admin-nav { display: flex; overflow-x: auto; padding-bottom: 8px; gap: 4px; } .admin-nav a { white-space: nowrap; padding: 8px 12px; } .btn { width: 100%; margin-bottom: 6px; } .actions .btn { min-width: auto; } input, textarea, select, button { font-size: 16px !important; } .modal-box { margin: 10px; } }
+.offline-msg { text-align: center; padding: 100px 24px; font-size: 18px; color: var(--text-dim); }
+.pfp-upload { display: flex; align-items: center; gap: 20px; margin-bottom: 24px; }
+.pfp-preview {
+  width: 64px; height: 64px; border-radius: 50%; object-fit: cover;
+  border: 3px solid var(--primary); box-shadow: 0 2px 8px var(--primary-glow);
+}
+.main-content { margin-right: 304px; }
+.ticket-message {
+  background: var(--bg-hover); padding: 14px; border-radius: 10px; margin: 10px 0;
+  font-size: 14px; white-space: pre-wrap; max-height: 160px; overflow-y: auto;
+}
+.admin-reply {
+  background: rgba(59,130,246,0.08); padding: 14px; border-radius: 10px; margin: 10px 0;
+  font-size: 14px; border-left: 3px solid var(--primary);
+}
+.ip-ban-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; background: var(--bg-hover); border-radius: 10px; margin-bottom: 10px;
+}
+.ip-ban-info { flex: 1; }
+.ip-ban-actions { display: flex; gap: 8px; }
+@media (max-width: 1100px) {
+  .sidebar { display: none; }
+  .main-content { margin-right: 0; }
+  .grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 768px) {
+  .container { padding: 0 20px; }
+  .nav { flex-wrap: wrap; }
+  .nav-links { width: 100%; justify-content: center; margin-top: 12px; }
+  .grid { grid-template-columns: 1fr; }
+  .photo-img { height: 220px; }
+  .admin-panel { grid-template-columns: 1fr; }
+  .admin-nav { display: flex; overflow-x: auto; padding-bottom: 10px; gap: 6px; }
+  .admin-nav a { white-space: nowrap; padding: 10px 14px; }
+  .btn { width: 100%; margin-bottom: 8px; }
+  .actions .btn { min-width: auto; }
+  input, textarea, select, button { font-size: 16px !important; }
+  .modal-box { margin: 12px; padding: 24px; }
+  .table { font-size: 13px; }
+  .table th, .table td { padding: 12px 14px; }
+}
 </style>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 '''
@@ -438,21 +579,21 @@ setInterval(()=>{fetch('/api/online').then(r=>r.text()).then(d=>{if(document.get
 '''
 
 # ============== TEMPLATES ==============
-OFFLINE_TMPL = '<!DOCTYPE html><html><head><title>PhotoBoth</title>'+CSS+'</head><body><div class="offline-msg"><h1 style="font-size:26px;margin-bottom:16px">🔧 {% if msg %}{{ msg }}{% else %}Site Offline{% endif %}</h1><p style="color:var(--text-dim)">We will return shortly.</p></div></body></html>'
+OFFLINE_TMPL = '<!DOCTYPE html><html><head><title>PhotoBoth</title>'+CSS+'</head><body><div class="offline-msg"><h1 style="font-size:28px;margin-bottom:20px">🔧 {% if msg %}{{ msg }}{% else %}Site Offline{% endif %}</h1><p style="color:var(--text-dim)">We will return shortly.</p></div></body></html>'
 
 LOGIN_TMPL = '''<!DOCTYPE html><html><head><title>Login</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
-<div class="container" style="max-width:420px;margin:80px auto">
+<div class="container" style="max-width:440px;margin:100px auto">
   <div class="modal-box" style="margin:0">
-    <h2 class="modal-header">Welcome Back</h2>
+    <h2 class="modal-header">Welcome to PhotoBoth</h2>
     <form method="POST">
-      <div class="input-group"><label>Nickname</label><input type="text" name="nickname" required autocomplete="username"></div>
-      <div class="input-group"><label>Password</label><input type="password" name="password" required autocomplete="current-password"></div>
+      <div class="input-group"><label>Nickname</label><input type="text" name="nickname" required autocomplete="username" placeholder="Enter your nickname"></div>
+      <div class="input-group"><label>Password</label><input type="password" name="password" required autocomplete="current-password" placeholder="Enter your password"></div>
       {% if error %}<span class="error-msg">{{ error }}</span>{% endif %}
-      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:16px">Sign In</button>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;font-size:15px">Sign In</button>
     </form>
-    <p style="margin-top:20px;font-size:13px;color:var(--text-dim);text-align:center">
-      New here? <a href="/register" style="color:var(--text-link)">Create account</a> • 
-      <a href="/support" style="color:var(--text-link)">Need help?</a>
+    <p style="margin-top:24px;font-size:14px;color:var(--text-dim);text-align:center">
+      New here? <a href="/register" style="color:var(--text-link);font-weight:500">Create account</a> • 
+      <a href="/support" style="color:var(--text-link);font-weight:500">Need help?</a>
     </p>
   </div>
 </div>
@@ -460,18 +601,18 @@ LOGIN_TMPL = '''<!DOCTYPE html><html><head><title>Login</title><meta name="viewp
 </body></html>'''
 
 REGISTER_TMPL = '''<!DOCTYPE html><html><head><title>Register</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
-<div class="container" style="max-width:420px;margin:80px auto">
+<div class="container" style="max-width:440px;margin:100px auto">
   <div class="modal-box" style="margin:0">
     <h2 class="modal-header">Create Account</h2>
     <form method="POST" enctype="multipart/form-data">
-      <div class="input-group"><label>Nickname</label><input type="text" name="nickname" required pattern="[a-zA-Z0-9_]{3,20}" autocomplete="username"></div>
-      <div class="input-group"><label>Password</label><input type="password" name="password" required minlength="6" autocomplete="new-password"></div>
-      <div class="input-group"><label>Confirm</label><input type="password" name="confirm" required autocomplete="new-password"></div>
+      <div class="input-group"><label>Nickname</label><input type="text" name="nickname" required pattern="[a-zA-Z0-9_]{3,20}" autocomplete="username" placeholder="3-20 chars, letters/numbers/underscores"></div>
+      <div class="input-group"><label>Password</label><input type="password" name="password" required minlength="6" autocomplete="new-password" placeholder="At least 6 characters"></div>
+      <div class="input-group"><label>Confirm Password</label><input type="password" name="confirm" required autocomplete="new-password" placeholder="Re-enter password"></div>
       <div class="input-group"><label>Profile Picture (optional)</label><input type="file" name="pfp" accept=".png,.jpg,.jpeg"></div>
       {% if error %}<span class="error-msg">{{ error }}</span>{% endif %}
-      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:16px">Register</button>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;font-size:15px">Register</button>
     </form>
-    <p style="margin-top:20px;font-size:13px;color:var(--text-dim);text-align:center">Have an account? <a href="/login" style="color:var(--text-link)">Sign In</a></p>
+    <p style="margin-top:24px;font-size:14px;color:var(--text-dim);text-align:center">Have an account? <a href="/login" style="color:var(--text-link);font-weight:500">Sign In</a></p>
   </div>
 </div>
 <script>initTheme();</script>
@@ -479,43 +620,43 @@ REGISTER_TMPL = '''<!DOCTYPE html><html><head><title>Register</title><meta name=
 
 MAIN_TMPL = '''<!DOCTYPE html><html><head><title>PhotoBoth</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
 <header><div class="container nav">
-  <a href="/" class="logo">✨ PhotoBoth</a>
+  <a href="/" class="logo">✨ PhotoBoth <span class="logo-badge">v4.0</span></a>
   <div class="nav-links">
     <button class="theme-toggle" onclick="toggleTheme()">🌓 Theme</button>
     <a href="/support">Support</a>
     {% if user and user.role=='admin' %}<a href="/admin">Dashboard</a>{% endif %}
     {% if user %}
-      <div style="display:flex;align-items:center;gap:8px">
-        <img src="/pfp/{{ user.pfp_filename }}" class="online-avatar" style="width:26px;height:26px;border:none">
-        <span style="font-size:13px">{{ user.nickname }}</span>
+      <div style="display:flex;align-items:center;gap:10px">
+        <img src="/pfp/{{ user.pfp_filename }}" class="online-avatar" style="width:30px;height:30px;border:none">
+        <span style="font-size:14px;font-weight:500">{{ user.nickname }}</span>
       </div>
-      <a href="/profile" class="btn">Profile</a>
-      <a href="/logout" class="btn btn-danger">Sign Out</a>
+      <a href="/profile" class="btn btn-sm">Profile</a>
+      <a href="/logout" class="btn btn-sm btn-danger">Sign Out</a>
     {% else %}
-      <a href="/login" class="btn btn-primary">Sign In</a>
+      <a href="/login" class="btn btn-primary btn-sm">Sign In</a>
     {% endif %}
   </div>
 </div></header>
-<div class="container" style="display:flex;gap:24px">
+<div class="container" style="display:flex;gap:28px">
   <div class="main-content" style="flex:1">
     {% if user and user.role=='admin' %}
     <div class="card">
-      <h3 style="margin-bottom:16px;font-size:17px">📤 Upload Image</h3>
+      <h3 style="margin-bottom:20px;font-size:18px;font-weight:700">📤 Upload Image</h3>
       <form method="POST" action="/upload" enctype="multipart/form-data">
         <div class="input-group"><label>Image File</label><input type="file" name="file" accept=".png,.jpg,.jpeg,.webp" required></div>
-        <div class="input-group"><label>Title</label><input type="text" name="title" placeholder="Give your image a title..." maxlength="100"></div>
-        <div class="input-group"><label>Description</label><textarea name="desc" rows="2" placeholder="Add a description..." maxlength="300"></textarea></div>
+        <div class="input-group"><label>Title (optional)</label><input type="text" name="title" placeholder="Give your image a descriptive title..." maxlength="100"></div>
+        <div class="input-group"><label>Description (optional)</label><textarea name="desc" rows="2" placeholder="Add context or details..." maxlength="300"></textarea></div>
         <div class="input-group"><label>Privacy</label>
           <select name="privacy">
-            <option value="public">🌐 Public</option>
-            <option value="private">🔒 Private</option>
+            <option value="public">🌐 Public - Everyone can view</option>
+            <option value="private">🔒 Private - Only selected users</option>
           </select>
         </div>
         <div id="private-users" class="input-group" style="display:none">
-          <label>Allow users (comma-separated)</label>
-          <input type="text" name="allowed_users" placeholder="user1, user2">
+          <label>Allow these users (comma-separated nicknames)</label>
+          <input type="text" name="allowed_users" placeholder="user1, user2, admin">
         </div>
-        <button type="submit" class="btn btn-primary">Upload</button>
+        <button type="submit" class="btn btn-primary">Upload Image</button>
       </form>
     </div>
     <script>document.querySelector('select[name="privacy"]').addEventListener('change',e=>{document.getElementById('private-users').style.display=e.target.value==='private'?'block':'none';});</script>
@@ -538,7 +679,7 @@ MAIN_TMPL = '''<!DOCTYPE html><html><head><title>PhotoBoth</title><meta name="vi
               <button class="btn" onclick="likePhoto({{ photo.id }})">Like</button>
               <button class="btn" onclick="trackDownload({{ photo.id }}, '{{ photo.filename }}')">Download</button>
             {% else %}
-              <a href="/login" class="btn" style="flex:1">Sign in</a>
+              <a href="/login" class="btn" style="flex:1">Sign in to interact</a>
             {% endif %}
           </div>
           <div class="comments-section">
@@ -550,7 +691,7 @@ MAIN_TMPL = '''<!DOCTYPE html><html><head><title>PhotoBoth</title><meta name="vi
                   <div class="comment-header">
                     <span class="comment-author">
                       {{ c.nick }}
-                      {% if c.is_admin %}<span class="verified-badge" title="Verified">✓</span>{% endif %}
+                      {% if c.is_admin %}<span class="verified-badge" title="Verified Admin">✓</span>{% endif %}
                     </span>
                     <span class="comment-time">{{ c.created_at[:10] }}</span>
                   </div>
@@ -558,16 +699,16 @@ MAIN_TMPL = '''<!DOCTYPE html><html><head><title>PhotoBoth</title><meta name="vi
                 </div>
               </div>
               {% endfor %}
-              {% if photo.comments|length < photo.comment_count %}<div style="color:var(--text-dim);font-size:12px;margin-top:6px">+ {{ photo.comment_count - photo.comments|length }} more</div>{% endif %}
+              {% if photo.comments|length < photo.comment_count %}<div style="color:var(--text-dim);font-size:12px;margin-top:8px">+ {{ photo.comment_count - photo.comments|length }} more comments</div>{% endif %}
             </div>
             <button class="load-more" id="btn-comments-{{ photo.id }}" onclick="toggleComments({{ photo.id }})">Show Comments</button>
             {% if user and not user.comment_banned %}
-            <form method="POST" action="/comment/{{ photo.id }}" style="margin-top:12px;display:flex;gap:8px">
+            <form method="POST" action="/comment/{{ photo.id }}" style="margin-top:16px;display:flex;gap:10px">
               <input type="text" name="content" placeholder="Add a comment..." required style="flex:1">
               <button type="submit" class="btn">Post</button>
             </form>
             {% elif user and user.comment_banned %}
-            <p style="font-size:12px;color:var(--warning);margin-top:8px">⚠️ Commenting restricted</p>
+            <p style="font-size:13px;color:var(--warning);margin-top:10px">⚠️ Commenting is currently restricted for your account</p>
             {% endif %}
           </div>
         </div>
@@ -576,7 +717,7 @@ MAIN_TMPL = '''<!DOCTYPE html><html><head><title>PhotoBoth</title><meta name="vi
     </div>
   </div>
   <aside class="sidebar">
-    <div class="sidebar-title">🟢 Online ({{ online_count }})</div>
+    <div class="sidebar-title">🟢 Online Now ({{ online_count }})</div>
     <div class="online-list" id="online-list">
       {% for u in online_users %}
       <div class="online-user">
@@ -591,13 +732,14 @@ MAIN_TMPL = '''<!DOCTYPE html><html><head><title>PhotoBoth</title><meta name="vi
 '''+JS+'''<script>document.querySelectorAll('.photo-card').forEach(c=>{if(c.dataset.id)trackView(c.dataset.id);});</script>
 </body></html>'''
 
-ADMIN_TMPL = '''<!DOCTYPE html><html><head><title>Admin</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
-<header><div class="container nav"><a href="/" class="logo">⚙️ Admin</a><div class="nav-links"><button class="theme-toggle" onclick="toggleTheme()">🌓</button><a href="/">Site</a><a href="/logout">Sign Out</a></div></div></header>
+ADMIN_TMPL = '''<!DOCTYPE html><html><head><title>Admin Dashboard</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
+<header><div class="container nav"><a href="/" class="logo">⚙️ Admin Panel</a><div class="nav-links"><button class="theme-toggle" onclick="toggleTheme()">🌓</button><a href="/">Site</a><a href="/logout" class="btn btn-sm btn-danger">Sign Out</a></div></div></header>
 <div class="container admin-panel">
   <nav class="admin-nav card">
     <a href="#photos" class="active">📸 Photos</a>
     <a href="#users">👥 Users</a>
     <a href="#banned">🚫 Banned</a>
+    <a href="#ipbans">🌐 IP Bans</a>
     <a href="#tickets">🎫 Support</a>
     <a href="#settings">⚙️ Settings</a>
   </nav>
@@ -605,62 +747,104 @@ ADMIN_TMPL = '''<!DOCTYPE html><html><head><title>Admin</title><meta name="viewp
     <section id="photos" class="card">
       <h3>Manage Photos</h3>
       <table class="table"><thead><tr><th>Image</th><th>Title</th><th>Privacy</th><th>Stats</th><th>Actions</th></tr></thead><tbody>
-      {% for p in photos %}<tr><td><img src="/uploads/{{ p.filename }}" style="width:48px;height:48px;object-fit:cover;border-radius:8px"></td>
-      <td>{{ p.title or p.original_name }}</td><td><span class="badge {% if p.privacy=='private' %}badge-open{% else %}badge-resolved{% endif %}">{{ p.privacy }}</span></td>
-      <td>{{ p.views }}v/{{ p.downloads }}d/{{ p.likes }}l</td>
-      <td><form method="POST" action="/admin/photo/{{ p.id }}/delete" onsubmit="return confirm('Delete?')"><button class="btn btn-danger">Delete</button></form></td></tr>{% endfor %}</tbody></table>
+      {% for p in photos %}<tr><td><img src="/uploads/{{ p.filename }}" style="width:56px;height:56px;object-fit:cover;border-radius:10px;border:1px solid var(--border)"></td>
+      <td><strong>{{ p.title or p.original_name }}</strong></td><td><span class="badge {% if p.privacy=='private' %}badge-open{% else %}badge-resolved{% endif %}">{{ p.privacy }}</span></td>
+      <td>{{ p.views }} views • {{ p.downloads }} downloads • {{ p.likes }} likes</td>
+      <td><form method="POST" action="/admin/photo/{{ p.id }}/delete" onsubmit="return confirm('Delete this photo?')"><button class="btn btn-sm btn-danger">Delete</button></form></td></tr>{% endfor %}</tbody></table>
     </section>
+    
     <section id="users" class="card">
       <h3>User Management</h3>
       <table class="table"><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Controls</th></tr></thead><tbody>
-      {% for u in users %}<tr><td><div style="display:flex;align-items:center;gap:10px"><img src="/pfp/{{ u.pfp }}" style="width:32px;height:32px;border-radius:50%;object-fit:cover">{{ u.nickname }}</div></td>
-      <td>{% if u.role=='admin' %}<span class="badge badge-admin">ADMIN</span>{% else %}User{% endif %}</td>
-      <td><span class="badge {% if u.status=='active' %}badge-resolved{% else %}badge-banned{% endif %}">{{ u.status }}</span></td>
-      <td style="display:flex;gap:6px;flex-wrap:wrap">
-        {% if u.role!='admin' %}
-        <form method="POST" action="/admin/user/{{ u.id }}/ban"><button class="btn btn-danger">Ban</button></form>
-        <form method="POST" action="/admin/user/{{ u.id }}/timeout"><button class="btn btn-warning">24h</button></form>
-        <form method="POST" action="/admin/user/{{ u.id }}/comment-ban"><button class="btn" style="background:var(--text-dim);color:white">No Comments</button></form>
-        <form method="POST" action="/admin/user/{{ u.id }}/promote"><button class="btn btn-success">Promote</button></form>
-        {% endif %}
-      </td></tr>{% endfor %}</tbody></table>
+      {% for u in users %}<tr>
+        <td>
+          <div style="display:flex;align-items:center;gap:12px">
+            <img src="/pfp/{{ u.pfp }}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid var(--border)">
+            <strong>{{ u.nickname }}</strong>
+          </div>
+        </td>
+        <td>{% if u.role=='admin' %}<span class="badge badge-admin">ADMIN</span>{% else %}<span style="color:var(--text-dim)">User</span>{% endif %}</td>
+        <td><span class="badge {% if u.status=='active' %}badge-resolved{% else %}badge-banned{% endif %}">{{ u.status }}</span></td>
+        <td style="display:flex;gap:8px;flex-wrap:wrap">
+          {% if u.role!='admin' %}
+          <form method="POST" action="/admin/user/{{ u.id }}/ban"><button class="btn btn-sm btn-danger" title="Ban User">Ban</button></form>
+          <form method="POST" action="/admin/user/{{ u.id }}/timeout"><button class="btn btn-sm btn-warning" title="24h Timeout">24h</button></form>
+          <form method="POST" action="/admin/user/{{ u.id }}/comment-ban"><button class="btn btn-sm" style="background:var(--text-dim);color:white" title="Restrict Comments">No Comments</button></form>
+          <form method="POST" action="/admin/user/{{ u.id }}/promote"><button class="btn btn-sm btn-success" title="Promote to Admin">Promote</button></form>
+          {% else %}
+          <form method="POST" action="/admin/user/{{ u.id }}/demote"><button class="btn btn-sm" style="background:var(--warning);color:white" title="Demote to User">Demote</button></form>
+          {% endif %}
+        </td>
+      </tr>{% endfor %}</tbody></table>
     </section>
+    
     <section id="banned" class="card">
       <h3>🚫 Banned Users</h3>
       {% if banned_users %}
-      <table class="table"><thead><tr><th>User</th><th>Until</th><th>Action</th></tr></thead><tbody>
-      {% for u in banned_users %}<tr><td>{{ u.nickname }}</td>
+      <table class="table"><thead><tr><th>User</th><th>Banned Until</th><th>Action</th></tr></thead><tbody>
+      {% for u in banned_users %}<tr><td><strong>{{ u.nickname }}</strong></td>
       <td>{% if u.ban_until %}{{ u.ban_until[:16] }}{% else %}Permanent{% endif %}</td>
-      <td><form method="POST" action="/admin/user/{{ u.id }}/unban"><button class="btn btn-success">Unban</button></form></td></tr>{% endfor %}</tbody></table>
+      <td><form method="POST" action="/admin/user/{{ u.id }}/unban"><button class="btn btn-sm btn-success">Unban</button></form></td></tr>{% endfor %}</tbody></table>
       {% else %}
-      <p style="color:var(--text-dim);padding:20px;text-align:center">No banned users.</p>
+      <p style="color:var(--text-dim);padding:24px;text-align:center">No users are currently banned.</p>
       {% endif %}
     </section>
+    
+    <section id="ipbans" class="card">
+      <h3>🌐 IP Ban Management</h3>
+      <div style="margin-bottom:20px">
+        <form method="POST" action="/admin/ipban/add" style="display:flex;gap:10px;flex-wrap:wrap">
+          <input type="text" name="ip_address" placeholder="IP address to ban" required style="flex:1;min-width:200px;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)">
+          <input type="text" name="reason" placeholder="Reason (optional)" style="flex:1;min-width:200px;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)">
+          <button type="submit" class="btn btn-danger">Ban IP</button>
+        </form>
+      </div>
+      {% if ip_bans %}
+      <div style="display:flex;flex-direction:column;gap:10px">
+      {% for ban in ip_bans %}
+      <div class="ip-ban-item">
+        <div class="ip-ban-info">
+          <strong>{{ ban.ip_address }}</strong>
+          {% if ban.reason %}<p style="color:var(--text-dim);font-size:13px;margin-top:4px">Reason: {{ ban.reason }}</p>{% endif %}
+          <p style="color:var(--text-dim);font-size:12px;margin-top:4px">Banned: {{ ban.created_at[:16] }}{% if ban.banned_until %} • Until: {{ ban.banned_until[:16] }}{% endif %}</p>
+        </div>
+        <div class="ip-ban-actions">
+          <form method="POST" action="/admin/ipban/remove/{{ ban.id }}"><button class="btn btn-sm btn-success">Remove</button></form>
+        </div>
+      </div>
+      {% endfor %}
+      </div>
+      {% else %}
+      <p style="color:var(--text-dim);padding:24px;text-align:center">No IP addresses are currently banned.</p>
+      {% endif %}
+    </section>
+    
     <section id="tickets" class="card">
       <h3>🎫 Support Tickets</h3>
       {% if tickets %}
       <table class="table"><thead><tr><th>User</th><th>Subject</th><th>Status</th><th>Message</th><th>Reply</th></tr></thead><tbody>
-      {% for t in tickets %}<tr><td>{{ t.nick or t.guest_nick or 'Guest' }}</td><td>{{ t.subject }}</td><td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
+      {% for t in tickets %}<tr><td><strong>{{ t.nick or t.guest_nick or 'Guest' }}</strong></td><td>{{ t.subject }}</td><td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
       <td><div class="ticket-message">{{ t.message }}</div></td>
       <td>
-        <form method="POST" action="/admin/ticket/{{ t.id }}/reply" style="display:flex;flex-direction:column;gap:6px">
-          <textarea name="reply" placeholder="Your response..." required style="min-height:50px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px"></textarea>
-          <button class="btn btn-primary">Send Reply</button>
+        <form method="POST" action="/admin/ticket/{{ t.id }}/reply" style="display:flex;flex-direction:column;gap:8px">
+          <textarea name="reply" placeholder="Your response..." required style="min-height:60px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:14px"></textarea>
+          <button class="btn btn-sm btn-primary">Send Reply</button>
         </form>
         {% if t.admin_reply %}<div class="admin-reply"><strong>You:</strong> {{ t.admin_reply }}</div>{% endif %}
       </td></tr>{% endfor %}</tbody></table>
       {% else %}
-      <p style="color:var(--text-dim);padding:20px;text-align:center">No open tickets.</p>
+      <p style="color:var(--text-dim);padding:24px;text-align:center">No open support tickets.</p>
       {% endif %}
     </section>
+    
     <section id="settings" class="card">
       <h3>Site Controls</h3>
-      <div style="display:grid;gap:16px">
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px;background:rgba(99,102,241,0.08);border-radius:10px">
-          <div><strong>🔌 Site Status</strong><p style="color:var(--text-dim);font-size:13px">Toggle maintenance mode</p></div>
+      <div style="display:grid;gap:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:16px;background:rgba(59,130,246,0.08);border-radius:12px">
+          <div><strong>🔌 Site Status</strong><p style="color:var(--text-dim);font-size:14px;margin-top:4px">Toggle maintenance mode for all users</p></div>
           <form method="POST" action="/admin/toggle-offline"><button class="btn {% if offline %}btn-primary{% else %}btn-danger{% endif %}">{% if offline %}Bring Online{% else %}Take Offline{% endif %}</button></form>
         </div>
-        <div class="input-group"><label>Maintenance Message</label><form method="POST" action="/admin/set-maintenance"><textarea name="msg" rows="2" style="width:100%">{{ maint_msg }}</textarea><button class="btn btn-primary" style="margin-top:8px">Update</button></form></div>
+        <div class="input-group"><label>Maintenance Message</label><form method="POST" action="/admin/set-maintenance"><textarea name="msg" rows="2" style="width:100%">{{ maint_msg }}</textarea><button class="btn btn-primary" style="margin-top:10px">Update Message</button></form></div>
       </div>
     </section>
   </div>
@@ -669,25 +853,25 @@ ADMIN_TMPL = '''<!DOCTYPE html><html><head><title>Admin</title><meta name="viewp
 </body></html>'''
 
 SUPPORT_TMPL = '''<!DOCTYPE html><html><head><title>Support</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
-<div class="container" style="max-width:600px;margin:60px auto">
+<div class="container" style="max-width:640px;margin:80px auto">
   <div class="card">
-    <h2 style="margin-bottom:20px;font-size:20px">🎫 Support</h2>
+    <h2 style="margin-bottom:24px;font-size:22px;font-weight:700">🎫 Support Center</h2>
     {% if not user %}
-    <div class="input-group"><label>Your Nickname (optional)</label><input type="text" name="guest_nick" placeholder="So we can identify you"></div>
+    <div class="input-group"><label>Your Nickname (optional)</label><input type="text" name="guest_nick" placeholder="So we can identify you in our system"></div>
     {% endif %}
     <div class="input-group"><label>Subject</label><select name="subject">
-      <option value="Password Reset">🔐 Password Reset</option>
-      <option value="Account Issue">⚠️ Account Issue</option>
+      <option value="Password Reset">🔐 Password Reset Request</option>
+      <option value="Account Issue">⚠️ Account Access Issue</option>
       <option value="Bug Report">🐛 Bug Report</option>
       <option value="Feature Request">💡 Feature Request</option>
-      <option value="Other">❓ Other</option>
+      <option value="Other">❓ Other Question</option>
     </select></div>
-    <div class="input-group"><label>Describe your issue</label><textarea name="message" rows="6" placeholder="Please provide details about your problem..." required></textarea></div>
+    <div class="input-group"><label>Describe your issue</label><textarea name="message" rows="7" placeholder="Please provide as much detail as possible about your issue..." required></textarea></div>
     {% if error %}<span class="error-msg">{{ error }}</span>{% endif %}
-    {% if success %}<span class="success-msg">✓ Ticket submitted! Check back here or your profile for admin responses.</span>{% endif %}
-    <form method="POST"><button type="submit" class="btn btn-primary" style="width:100%;margin-top:16px">Submit Ticket</button></form>
-    <p style="margin-top:20px;font-size:12px;color:var(--text-dim);text-align:center">
-      All support is handled internally. Admins will respond within the app.
+    {% if success %}<span class="success-msg">✓ Ticket submitted successfully! An admin will review and respond within the app.</span>{% endif %}
+    <form method="POST"><button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;font-size:15px">Submit Support Ticket</button></form>
+    <p style="margin-top:24px;font-size:13px;color:var(--text-dim);text-align:center">
+      All support is handled internally within PhotoBoth. Admins will respond directly in the app.
     </p>
   </div>
 </div>
@@ -695,37 +879,37 @@ SUPPORT_TMPL = '''<!DOCTYPE html><html><head><title>Support</title><meta name="v
 </body></html>'''
 
 PROFILE_TMPL = '''<!DOCTYPE html><html><head><title>Profile</title><meta name="viewport" content="width=device-width,initial-scale=1">'''+CSS+'''</head><body>
-<header><div class="container nav"><a href="/" class="logo">✨ PhotoBoth</a><div class="nav-links"><button class="theme-toggle" onclick="toggleTheme()">🌓</button><a href="/">Home</a><a href="/logout" class="btn btn-danger">Sign Out</a></div></div></header>
-<div class="container" style="max-width:560px;margin:60px auto">
+<header><div class="container nav"><a href="/" class="logo">✨ PhotoBoth</a><div class="nav-links"><button class="theme-toggle" onclick="toggleTheme()">🌓</button><a href="/">Home</a><a href="/logout" class="btn btn-sm btn-danger">Sign Out</a></div></div></header>
+<div class="container" style="max-width:600px;margin:80px auto">
   <div class="card">
-    <h2 style="margin-bottom:24px">👤 Your Profile</h2>
+    <h2 style="margin-bottom:28px;font-size:22px;font-weight:700">👤 Your Profile</h2>
     <div class="pfp-upload">
-      <img src="/pfp/{{ user.pfp_filename }}" class="pfp-preview" alt="Profile">
+      <img src="/pfp/{{ user.pfp_filename }}" class="pfp-preview" alt="Profile Picture">
       <form method="POST" enctype="multipart/form-data" style="flex:1">
         <div class="input-group"><label>Change Profile Picture</label><input type="file" name="pfp" accept=".png,.jpg,.jpeg"></div>
-        <button type="submit" class="btn btn-primary">Update</button>
+        <button type="submit" class="btn btn-primary">Update Picture</button>
       </form>
     </div>
-    <div class="input-group"><label>Nickname</label><input type="text" value="{{ user.nickname }}" disabled style="background:var(--bg-hover)"></div>
-    <div class="input-group"><label>Role</label><input type="text" value="{{ user.role|upper }}" disabled style="background:var(--bg-hover)"></div>
+    <div class="input-group"><label>Nickname</label><input type="text" value="{{ user.nickname }}" disabled style="background:var(--bg-hover);font-weight:500"></div>
+    <div class="input-group"><label>Account Role</label><input type="text" value="{{ user.role|upper }}" disabled style="background:var(--bg-hover);font-weight:500"></div>
     <div class="input-group"><label>Member Since</label><input type="text" value="{{ user.created_at[:10] }}" disabled style="background:var(--bg-hover)"></div>
     {% if user.comment_banned_until %}
-    <p style="color:var(--warning);font-size:13px;margin-top:12px">⚠️ Commenting restricted until: {{ user.comment_banned_until[:10] }}</p>
+    <p style="color:var(--warning);font-size:14px;margin-top:16px;padding:12px;background:rgba(245,158,11,0.1);border-radius:8px">⚠️ Commenting is restricted until: {{ user.comment_banned_until[:10] }}</p>
     {% endif %}
     {% if user_tickets %}
-    <div style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
-      <h3 style="margin-bottom:12px">🎫 Your Tickets</h3>
+    <div style="margin-top:32px;border-top:1px solid var(--border);padding-top:24px">
+      <h3 style="margin-bottom:16px;font-weight:700">🎫 Your Support Tickets</h3>
       {% for t in user_tickets %}
-      <div class="card" style="padding:14px;margin-bottom:12px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <strong>{{ t.subject }}</strong>
+      <div class="card" style="padding:16px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <strong style="font-size:15px">{{ t.subject }}</strong>
           <span class="badge badge-{{ t.status }}">{{ t.status }}</span>
         </div>
-        <p style="font-size:13px;color:var(--text-dim);margin-bottom:8px">{{ t.message[:100] }}{% if t.message|length > 100 %}...{% endif %}</p>
+        <p style="font-size:14px;color:var(--text-dim);margin-bottom:12px;line-height:1.5">{{ t.message }}</p>
         {% if t.admin_reply %}
-        <div class="admin-reply"><strong>Admin:</strong> {{ t.admin_reply }}</div>
+        <div class="admin-reply"><strong>Admin Response:</strong> {{ t.admin_reply }}</div>
         {% else %}
-        <p style="font-size:12px;color:var(--text-dim)">⏳ Waiting for admin response</p>
+        <p style="font-size:13px;color:var(--text-dim);font-style:italic">⏳ Waiting for admin response</p>
         {% endif %}
       </div>
       {% endfor %}
@@ -778,7 +962,7 @@ def register():
         nick = request.form['nickname'].strip()
         pwd, conf = request.form['password'], request.form['confirm']
         if not re.match(r'^[a-zA-Z0-9_]{3,20}$', nick):
-            return render_template_string(REGISTER_TMPL, error="Nickname: 3-20 chars, alphanumeric only"), 400
+            return render_template_string(REGISTER_TMPL, error="Nickname must be 3-20 characters, using only letters, numbers, and underscores"), 400
         if len(pwd) < 6:
             return render_template_string(REGISTER_TMPL, error="Password must be at least 6 characters"), 400
         if pwd != conf:
@@ -795,7 +979,7 @@ def register():
             conn.close()
             return redirect(url_for('login'))
         except:
-            return render_template_string(REGISTER_TMPL, error="Nickname already taken"), 400
+            return render_template_string(REGISTER_TMPL, error="This nickname is already taken"), 400
     return render_template_string(REGISTER_TMPL)
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -804,10 +988,10 @@ def login():
         nick, pwd = request.form['nickname'].strip(), request.form['password']
         ip = get_ip()
         if check_rate_limit(ip):
-            return render_template_string(LOGIN_TMPL, error="Too many attempts. Please wait."), 429
+            return render_template_string(LOGIN_TMPL, error="Too many login attempts. Please wait a minute before trying again."), 429
         locked, mins = check_account_lockout(nick)
         if locked:
-            return render_template_string(LOGIN_TMPL, error=f"Account locked. Try again in {mins} minutes."), 403
+            return render_template_string(LOGIN_TMPL, error=f"Account locked due to failed attempts. Try again in {mins} minutes."), 403
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         u = conn.execute('SELECT * FROM users WHERE nickname = ?', (nick,)).fetchone()
@@ -815,10 +999,10 @@ def login():
         if not u or dict(u)['password_hash'] != hash_pwd(pwd):
             record_login_attempt(ip, nick)
             increment_failed_login(nick)
-            return render_template_string(LOGIN_TMPL, error="Invalid credentials."), 401
+            return render_template_string(LOGIN_TMPL, error="Invalid nickname or password"), 401
         user = dict(u)
         if is_banned(user):
-            return render_template_string(LOGIN_TMPL, error="Account is restricted."), 403
+            return render_template_string(LOGIN_TMPL, error="This account has been restricted"), 403
         reset_login_attempts(nick)
         session['user_id'] = user['id']
         session['role'] = user['role']
@@ -960,7 +1144,7 @@ def support():
         guest_nick = request.form.get('guest_nick', '').strip() if not user else None
         subject, msg = request.form['subject'], request.form['message']
         if not msg.strip():
-            return render_template_string(SUPPORT_TMPL, error="Message required."), 400
+            return render_template_string(SUPPORT_TMPL, error="Please describe your issue"), 400
         conn = sqlite3.connect(DB_PATH)
         conn.execute('''INSERT INTO support_tickets (user_id, guest_nick, subject, message) VALUES (?, ?, ?, ?)''', (uid, guest_nick, subject, msg))
         conn.commit()
@@ -982,11 +1166,12 @@ def admin():
     photos = db.execute('SELECT id, filename, original_name, title, privacy, views, downloads, likes FROM photos ORDER BY upload_date DESC').fetchall()
     users = db.execute('SELECT id, nickname, role, status, pfp_filename, comment_banned_until FROM users WHERE status="active" ORDER BY created_at DESC').fetchall()
     banned = db.execute('SELECT id, nickname, ban_until FROM users WHERE status="banned" ORDER BY ban_until DESC').fetchall()
+    ip_bans = db.execute('SELECT * FROM ip_bans ORDER BY created_at DESC').fetchall()
     tickets = db.execute('''SELECT t.id, t.subject, t.status, t.admin_reply, t.message, t.guest_nick, u.nickname as nick FROM support_tickets t LEFT JOIN users u ON t.user_id=u.id ORDER BY t.created_at DESC''').fetchall()
     offline = is_site_offline()
     maint_msg = db.execute('SELECT value FROM settings WHERE key="maintenance_msg"').fetchone()[0]
     db.close()
-    return render_template_string(ADMIN_TMPL, photos=[dict(p) for p in photos], users=[dict(u) for u in users], banned_users=[dict(b) for b in banned], tickets=[dict(t) for t in tickets], offline=offline, maint_msg=maint_msg)
+    return render_template_string(ADMIN_TMPL, photos=[dict(p) for p in photos], users=[dict(u) for u in users], banned_users=[dict(b) for b in banned], ip_bans=[dict(i) for i in ip_bans], tickets=[dict(t) for t in tickets], offline=offline, maint_msg=maint_msg)
 
 @app.route('/admin/photo/<int:pid>/delete', methods=['POST'])
 @require_admin
@@ -1050,6 +1235,15 @@ def admin_promote(uid):
     conn.close()
     return redirect(url_for('admin'))
 
+@app.route('/admin/user/<int:uid>/demote', methods=['POST'])  # ✅ NEW: Demote admin to user
+@require_admin
+def admin_demote(uid):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE users SET role="user" WHERE id=? AND role="admin"', (uid,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin'))
+
 @app.route('/admin/ticket/<int:tid>/reply', methods=['POST'])
 @require_admin
 def admin_reply(tid):
@@ -1075,6 +1269,27 @@ def admin_set_maint():
     msg = request.form.get('msg', 'Site under maintenance')[:200]
     conn = sqlite3.connect(DB_PATH)
     conn.execute('UPDATE settings SET value = ? WHERE key="maintenance_msg"', (msg,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin'))
+
+@app.route('/admin/ipban/add', methods=['POST'])  # ✅ NEW: Add IP ban
+@require_admin
+def admin_add_ipban():
+    ip = request.form.get('ip_address', '').strip()
+    reason = request.form.get('reason', '').strip() or 'Admin action'
+    if ip:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('INSERT OR IGNORE INTO ip_bans (ip_address, reason) VALUES (?, ?)', (ip, reason))
+        conn.commit()
+        conn.close()
+    return redirect(url_for('admin'))
+
+@app.route('/admin/ipban/remove/<int:bid>', methods=['POST'])  # ✅ NEW: Remove IP ban
+@require_admin
+def admin_remove_ipban(bid):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('DELETE FROM ip_bans WHERE id=?', (bid,))
     conn.commit()
     conn.close()
     return redirect(url_for('admin'))
